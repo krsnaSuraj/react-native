@@ -112,6 +112,155 @@ const codegenCommand /*: Command */ = {
 
 commands.push(codegenCommand);
 
+const spmCommand /*: Command */ = {
+  name: 'spm [action]',
+  description:
+    'Set up or maintain Swift Package Manager support for the iOS/macOS app. ' +
+    'Actions: init, update, sync, clean, codegen, download, scaffold. ' +
+    'With no action: defaults to update.',
+  options: [
+    {
+      name: '--version <string>',
+      description:
+        'React Native version (e.g. 0.80.0). Defaults to the version in node_modules/react-native/package.json.',
+    },
+    {
+      name: '--localXcframework <path>',
+      description: 'Use a local React.xcframework instead of downloading.',
+    },
+    {
+      name: '--artifactsDir <path>',
+      description: 'Override the artifact cache directory.',
+    },
+    {
+      name: '--flavor <string>',
+      description: 'Artifact flavor: debug or release.',
+    },
+    {
+      name: '--skipCodegen',
+      description: 'Skip react-native codegen step.',
+    },
+    {
+      name: '--skipDownload',
+      description: 'Skip automatic artifact download.',
+    },
+    {
+      name: '--forceDownload',
+      description: 'Clear cached artifacts and re-download from Maven.',
+    },
+    {
+      name: '--skipXcodeproj',
+      description: 'Skip .xcodeproj generation.',
+    },
+    {
+      name: '--forceXcodeproj',
+      description:
+        'Regenerate <App>.xcodeproj even when one already exists. ' +
+        'Clobbers Xcode-side edits (signing, capabilities, Build Phases).',
+    },
+    {
+      name: '--fromScratch',
+      description:
+        '[init] Generate a brand-new <App>.xcodeproj (renaming the existing ' +
+        'one to .legacy) instead of the default in-place injection into the ' +
+        'existing project.',
+    },
+    {
+      name: '--xcodeproj <path>',
+      description:
+        '[init] Path to the existing .xcodeproj to inject SPM packages into ' +
+        '(disambiguates when several exist).',
+    },
+    {
+      name: '--bundleIdentifier <string>',
+      description: 'Override CFBundleIdentifier in the generated Info.plist.',
+    },
+    {
+      name: '--productName <string>',
+      description: 'Override PRODUCT_NAME in the generated Info.plist.',
+    },
+    {
+      name: '--entryFile <path>',
+      description:
+        'JS entry file relative to app root (default: package.json "main" or index.js).',
+    },
+    {
+      name: '--project',
+      description:
+        '[clean] Also remove Package.swift and <App>-SPM.xcodeproj/.',
+    },
+    {
+      name: '--derivedData',
+      description:
+        "[clean] Also remove this app's DerivedData (~/Library/Developer/Xcode/DerivedData/<App>-SPM-*).",
+    },
+    {
+      name: '--cache',
+      description:
+        '[clean] Also remove the cached xcframework slot for the current resolved version.',
+    },
+    {
+      name: '--all',
+      description: '[clean] Shorthand for --project --derivedData --cache.',
+    },
+    {
+      name: '--yes',
+      description:
+        '[clean] Skip the confirmation prompt for destructive scopes.',
+    },
+    // Workaround for @react-native-community/cli: when any positional equals
+    // "init" (including our `spm init` action), the CLI naively appends
+    // `--platform-name <platform>` to argv. Accept and ignore it so commander
+    // does not reject the unknown option.
+    {
+      name: '--platform-name <string>',
+      description: '(ignored — CLI compatibility shim for `spm init`)',
+    },
+  ],
+  func: async (argv, _config, args) => {
+    const passthrough /*: Array<string> */ = [];
+    if (argv[0] != null) {
+      passthrough.push(argv[0]);
+    }
+    const stringOpts /*: Array<[string, string]> */ = [
+      ['version', '--version'],
+      ['localXcframework', '--local-xcframework'],
+      ['artifactsDir', '--artifacts-dir'],
+      ['flavor', '--flavor'],
+      ['bundleIdentifier', '--bundle-identifier'],
+      ['productName', '--product-name'],
+      ['entryFile', '--entry-file'],
+      ['xcodeproj', '--xcodeproj'],
+    ];
+    for (const [key, flag] of stringOpts) {
+      if (args[key] != null) {
+        passthrough.push(flag, String(args[key]));
+      }
+    }
+    const boolOpts /*: Array<[string, string]> */ = [
+      ['skipCodegen', '--skip-codegen'],
+      ['skipDownload', '--skip-download'],
+      ['forceDownload', '--force-download'],
+      ['skipXcodeproj', '--skip-xcodeproj'],
+      ['forceXcodeproj', '--force-xcodeproj'],
+      ['fromScratch', '--from-scratch'],
+      ['project', '--project'],
+      ['derivedData', '--derived-data'],
+      ['cache', '--cache'],
+      ['all', '--all'],
+      ['yes', '--yes'],
+    ];
+    for (const [key, flag] of boolOpts) {
+      if (args[key]) {
+        passthrough.push(flag);
+      }
+    }
+    await require('./scripts/setup-apple-spm').main(passthrough);
+  },
+};
+
+commands.push(spmCommand);
+
 const config = {
   commands,
   platforms: {} /*:: as {[string]: Readonly<{

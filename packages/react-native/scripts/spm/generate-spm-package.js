@@ -1,0 +1,385 @@
+/**
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ *
+ * @flow strict-local
+ * @format
+ */
+
+'use strict';
+
+/*:: import type {GeneratePackageArgs} from './spm-types'; */
+
+/**
+ * generate-spm-package.js – Generates the xcframeworks sub-package for a
+ * React Native app using prebuilt XCFrameworks via Swift Package Manager.
+ *
+ * Usage:
+ *   node generate-spm-package.js [options]
+ *
+ * Options:
+ *   --app-root <path>            Path to the app directory (default: cwd)
+ *   --react-native-root <path>   Path to react-native package root
+ *   --version <ver>              RN version for Maven artifact URLs
+ *   --local-xcframework <path>   Use local xcframework (skips binary targets)
+ *   --artifacts-dir <path>       Path to downloaded artifacts directory
+ *   --app-name <name>            App/package name (default: from package.json)
+ *   --target-name <name>         Main app target name (default: derived from app-name)
+ *   --source-path <path>         Path to app source relative to app-root (default: auto-detected)
+ *   --ios-version <ver>          Minimum iOS version (default: 15)
+ *
+ * Generates build/xcframeworks/Package.swift + symlinks. The xcodeproj
+ * references this sub-package directly; no separate app-level Package.swift
+ * is needed.
+ */
+
+const {REQUIRED_ARTIFACTS} = require('./download-spm-artifacts');
+const {
+  deriveAppName,
+  displayPath,
+  findProjectRoot,
+  makeLogger,
+  readPackageJson,
+  resolveReactNativeRoot,
+  toSwiftName,
+} = require('./spm-utils');
+const fs = require('fs');
+const path = require('path');
+const yargs = require('yargs');
+
+const {log} = makeLogger('generate-spm-package');
+
+function parseArgs(argv /*: Array<string> */) /*: GeneratePackageArgs */ {
+  const parsed = yargs(argv)
+    .version(false)
+    .option('app-root', {
+      type: 'string',
+      default: process.cwd(),
+      describe: 'Path to the app directory',
+    })
+    .option('react-native-root', {
+      type: 'string',
+      describe: 'Path to react-native package root',
+    })
+    .option('version', {
+      type: 'string',
+      describe: 'RN version for Maven artifact URLs',
+    })
+    .option('local-xcframework', {
+      type: 'string',
+      describe: 'Use local xcframework (skips binary targets)',
+    })
+    .option('artifacts-dir', {
+      type: 'string',
+      describe: 'Path to downloaded artifacts directory',
+    })
+    .option('app-name', {
+      type: 'string',
+      describe: 'App/package name (default: from package.json)',
+    })
+    .option('target-name', {
+      type: 'string',
+      describe: 'Main app target name (default: derived from app-name)',
+    })
+    .option('source-path', {
+      type: 'string',
+      describe:
+        'Path to app source relative to app-root (default: auto-detected)',
+    })
+    .option('ios-version', {
+      type: 'string',
+      default: '15',
+      describe: 'Minimum iOS version',
+    })
+    .usage(
+      'Usage: $0 [options]\n\nGenerates the xcframeworks sub-package for a React Native app using SPM.',
+    )
+    .help()
+    .parseSync();
+
+  return {
+    appRoot: parsed['app-root'],
+    reactNativeRoot: parsed['react-native-root'] ?? null,
+    version: parsed.version ?? null,
+    localXcframework: parsed['local-xcframework'] ?? null,
+    artifactsDir: parsed['artifacts-dir'] ?? null,
+    appName: parsed['app-name'] ?? null,
+    targetName: parsed['target-name'] ?? null,
+    sourcePath: parsed['source-path'] ?? null,
+    iosVersion: parsed['ios-version'],
+  };
+}
+
+/**
+ * Find the app's main Swift/ObjC source directory.
+ * Looks for directories that contain native iOS source files.
+ */
+function findSourcePath(
+  appRoot /*: string */,
+  packageName /*: string */,
+) /*: string */ {
+  // Derive from package name (e.g. "@react-native/tester" -> "Tester")
+  const derived = toSwiftName(packageName.replace(/^@[^/]+\//, ''));
+
+  // Also check "RN" + derived (e.g. "Tester" -> "RNTester") and "RN" + whole name
+  const rnPrefixed = 'RN' + derived;
+  const candidates = [derived, rnPrefixed, 'ios', 'App', 'Sources', 'src'];
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(appRoot, c))) {
+      return c;
+    }
+  }
+
+  // Scan for a directory that looks like an iOS source root
+  // (contains .m, .mm, .swift, or .h files)
+  try {
+    const entries /*: Array<{name: string, isDirectory(): boolean}> */ =
+      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow but always string here
+      fs.readdirSync(appRoot, {withFileTypes: true});
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      const dirPath = path.join(appRoot, entry.name);
+      const subEntries = fs.readdirSync(dirPath);
+      const hasNativeSources = subEntries.some((f /*: string | Buffer */) =>
+        /\.(m|mm|swift|cpp|h|hpp)$/.test(String(f)),
+      );
+      if (hasNativeSources) {
+        return entry.name;
+      }
+    }
+  } catch (_) {
+    // ignore
+  }
+
+  return derived;
+}
+
+/**
+ * Generates the Package.swift for the xcframeworks sub-package.
+ *
+ * When using local xcframeworks (from the cache), we put the binary targets in
+ * a dedicated Package.swift at build/xcframeworks/. The generated .xcodeproj
+ * references this sub-package via XCLocalSwiftPackageReference; the codegen
+ * Package.swift also imports it as a named package dependency.
+ */
+function generateXCFrameworksPackageSwift(
+  names /*: Array<string> */,
+  artifactsDir /*:: ?: ?string */,
+) /*: string */ {
+  // Rename the "React" product to "ReactNative" so consumers use
+  // .product(name: "ReactNative", package: "ReactNative") -- a clearer API.
+  // The binary target stays "React" (must match React.xcframework filename).
+  const productName = (n /*: string */) => (n === 'React' ? 'ReactNative' : n);
+
+  const products = names
+    .map(n => {
+      const pName = productName(n);
+      return `        .library(name: "${pName}", targets: ["${n}"]),`;
+    })
+    .join('\n');
+
+  // Binary target paths must be RELATIVE to the package root — SPM rejects
+  // absolute paths with "invalid local path" at manifest-load time. The
+  // bare `<Name>.xcframework` resolves to the symlink under
+  // <app>/build/xcframeworks/ that generate-spm-package keeps pointed at the
+  // current cache slot.
+  const binaryTargets = names
+    .map(n => `        .binaryTarget(name: "${n}", path: "${n}.xcframework"),`)
+    .join('\n');
+
+  // Cache-slot identifier embedded as a top-of-file comment. SPM re-evaluates
+  // Package.swift when its content hash changes — a slot bump alters this
+  // line, busting the manifest cache and forcing SPM to re-read the binary
+  // target (which then re-copies React.framework into BUILT_PRODUCTS_DIR).
+  // Without it, a same-named symlink re-pointed at a different target leaves
+  // the manifest hash unchanged and the framework copy stale.
+  //
+  // Use only the trailing <version>/<flavor> segments of the artifactsDir so
+  // the comment is portable across users — the full absolute path includes
+  // ~/Library/Caches which differs per machine. The file is gitignored
+  // anyway, but this keeps any incidental diffing clean.
+  let slotComment = '';
+  if (artifactsDir != null) {
+    const flavor = path.basename(artifactsDir);
+    const version = path.basename(path.dirname(artifactsDir));
+    slotComment = `// Cache slot: ${version}/${flavor}\n`;
+  }
+
+  return `// swift-tools-version: 6.0
+// AUTO-GENERATED by scripts/generate-spm-package.js – do not edit manually.
+${slotComment}import PackageDescription
+
+let package = Package(
+    name: "ReactNative",
+    products: [
+${products}
+    ],
+    targets: [
+${binaryTargets}
+    ]
+)
+`;
+}
+
+function main(
+  argv /*:: ?: Array<string> */,
+  deps /*:: ?: {ensureHeadersLayout?: (string, string, string) => {reactXcfw: string, headersXcfw: string}} */,
+) /*: void */ {
+  const args = parseArgs(argv ?? process.argv.slice(2));
+  // Ensure appRoot is always absolute so path.join/path.resolve produce absolute paths
+  // even when called with --app-root . or other relative paths.
+  const appRoot = path.resolve(args.appRoot);
+
+  // Read app package.json
+  // package.json may be in a parent directory (e.g. when appRoot is ios/).
+  const projectRoot = findProjectRoot(appRoot);
+  const pkgJson = readPackageJson(projectRoot);
+  if (!pkgJson) {
+    console.error(
+      `[generate-spm-package] No package.json found in ${appRoot} or parent directories`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  let rnRoot =
+    args.reactNativeRoot != null
+      ? path.resolve(args.reactNativeRoot)
+      : resolveReactNativeRoot(appRoot, projectRoot);
+  if (rnRoot == null) {
+    console.error(
+      '[generate-spm-package] Could not find react-native. Pass --react-native-root.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  let version = args.version;
+  if (version == null) {
+    const rnPkg = readPackageJson(rnRoot);
+    version = rnPkg?.version ?? '0.0.0';
+  }
+
+  const rawName = pkgJson.name ?? path.basename(appRoot);
+  const sourcePath = args.sourcePath ?? findSourcePath(appRoot, rawName);
+  const appName = args.appName ?? deriveAppName(rawName, sourcePath);
+  const targetName = args.targetName ?? appName + 'App';
+
+  log(`App name:    ${appName}`);
+  log(`Target name: ${targetName}`);
+  log(`Source path: ${sourcePath}`);
+  log(`Version:     ${version}`);
+
+  const artifactsDir = args.artifactsDir;
+  if (artifactsDir != null) {
+    const artifactsJsonPath = path.join(artifactsDir, 'artifacts.json');
+    if (!fs.existsSync(artifactsJsonPath)) {
+      console.error(
+        `[generate-spm-package] --artifacts-dir specified but artifacts.json not found at: ${artifactsJsonPath}`,
+      );
+      console.error(
+        `  Run: node scripts/download-spm-artifacts.js --output "${artifactsDir}"`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    // $FlowFixMe[incompatible-type] JSON.parse returns any
+    const raw /*: {[string]: {xcframeworkPath: string, url: string}} */ =
+      JSON.parse(fs.readFileSync(artifactsJsonPath, 'utf8'));
+    // Refuse to proceed with a partial artifact set. The generated xcodeproj
+    // references every REQUIRED_ARTIFACT as a package product, so a missing
+    // entry here would surface only as "Missing package product" in Xcode.
+    const missing = REQUIRED_ARTIFACTS.filter(name => raw[name] == null);
+    if (missing.length > 0) {
+      console.error(
+        `[generate-spm-package] artifacts.json is missing required entries: ${missing.join(', ')}`,
+      );
+      console.error(
+        `  Re-run with --force-download to refresh the cache slot at ${artifactsDir}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const xcfwLinksDir = path.join(appRoot, 'build', 'xcframeworks');
+    fs.mkdirSync(xcfwLinksDir, {recursive: true});
+
+    // The spec layout (headers-spec.js) is what
+    // consumers compile against. When the slot's artifacts.json already
+    // carries ReactNativeHeaders (published or local tarball via
+    // download-spm-artifacts), the artifacts ship the layout and are used
+    // as-is. Otherwise the layout is COMPOSED locally from the slot's
+    // React + deps artifacts (binaries untouched; headers re-projected) —
+    // fast, marker-cached, re-run safe.
+    const rnPkgRoot = path.resolve(__dirname, '..', '..');
+    const overrides /*: {[string]: string} */ = {};
+    if (raw.ReactNativeHeaders == null) {
+      const ensureHeadersLayout =
+        deps?.ensureHeadersLayout ??
+        // $FlowFixMe[cannot-resolve-module] cross-dir require into ios-prebuild
+        require('../ios-prebuild/headers-compose').ensureHeadersLayout;
+      const composed = ensureHeadersLayout(
+        artifactsDir ?? path.dirname(String(raw.React?.xcframeworkPath ?? '')),
+        rnPkgRoot,
+        path.join(rnPkgRoot, 'build', 'headers'),
+      );
+      overrides.React = composed.reactXcfw;
+      overrides.ReactNativeHeaders = composed.headersXcfw;
+    }
+
+    const names /*: Array<string> */ = [];
+    const linkOne = (name /*: string */, target /*: string */) => {
+      const linkPath = path.join(xcfwLinksDir, `${name}.xcframework`);
+      try {
+        fs.unlinkSync(linkPath);
+      } catch {
+        /* doesn't exist yet */
+      }
+      fs.symlinkSync(target, linkPath);
+      log(
+        `Symlink: build/xcframeworks/${name}.xcframework -> ${displayPath(target)}`,
+      );
+      names.push(name);
+    };
+    // $FlowFixMe[incompatible-use] Object.entries values typed as mixed
+    for (const [name, entry] of Object.entries(raw)) {
+      linkOne(name, overrides[name] ?? entry.xcframeworkPath);
+    }
+    if (overrides.ReactNativeHeaders != null) {
+      linkOne('ReactNativeHeaders', overrides.ReactNativeHeaders);
+    }
+
+    // Pass the absolute artifacts dir so the binary target paths reference the
+    // current cache slot. When the slot changes (e.g. new nightly published),
+    // Package.swift content changes — SPM/Xcode notice and re-copy the framework.
+    const xcfwPkgContent = generateXCFrameworksPackageSwift(
+      names,
+      artifactsDir,
+    );
+    const xcfwPkgPath = path.join(xcfwLinksDir, 'Package.swift');
+    fs.writeFileSync(xcfwPkgPath, xcfwPkgContent, 'utf8');
+    log(`Generated: ${path.relative(appRoot, xcfwPkgPath)}`);
+
+    log(`Artifacts dir: ${displayPath(artifactsDir)} (local xcframework mode)`);
+  } else {
+    // Auto-detect: if build/xcframeworks/Package.swift already exists (e.g. from a
+    // previous run with --artifacts-dir), reuse it without re-downloading anything.
+    const xcfwLinksDir = path.join(appRoot, 'build', 'xcframeworks');
+    if (fs.existsSync(path.join(xcfwLinksDir, 'Package.swift'))) {
+      log(`Auto-detected local xcframeworks: build/xcframeworks`);
+    }
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  main,
+  generateXCFrameworksPackageSwift,
+  findSourcePath,
+};

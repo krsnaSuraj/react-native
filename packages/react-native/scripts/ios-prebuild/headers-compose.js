@@ -17,6 +17,11 @@
  * byte-identical output either way.
  */
 
+const {
+  buildI18nStringsBundle,
+  buildReactPrivacyManifest,
+  serializePrivacyManifest,
+} = require('./framework-resources');
 const {computeInventory} = require('./headers-inventory');
 const {
   DEPS_NAMESPACES,
@@ -138,6 +143,14 @@ function emitReactFrameworkHeaders(
   const slices = fs
     .readdirSync(xcfwPath)
     .filter(d => fs.existsSync(path.join(xcfwPath, d, 'React.framework')));
+
+  // Aggregate the privacy manifests of the pods baked into React.framework into
+  // one root-level PrivacyInfo.xcprivacy, so the prebuilt artifact carries them
+  // for both CocoaPods-prebuilt and SwiftPM (source builds get them from the
+  // podspecs instead). Built once, embedded per slice.
+  const privacyManifest = buildReactPrivacyManifest(rnRoot);
+  let i18nLocales = 0;
+
   for (const slice of slices) {
     const fwk = path.join(xcfwPath, slice, 'React.framework');
     fs.rmSync(path.join(fwk, 'Headers'), {recursive: true, force: true});
@@ -148,11 +161,25 @@ function emitReactFrameworkHeaders(
       path.join(fwk, 'Modules', 'module.modulemap'),
       renderReactModuleMap(plan.privateReactHeaders),
     );
+    if (privacyManifest != null) {
+      fs.writeFileSync(
+        path.join(fwk, 'PrivacyInfo.xcprivacy'),
+        serializePrivacyManifest(privacyManifest),
+      );
+    }
+    // Embed React-Core's localized strings as RCTI18nStrings.bundle so the
+    // framework-aware RCTLocalizedString loader resolves them in prebuilt/SPM.
+    i18nLocales = buildI18nStringsBundle(
+      rnRoot,
+      path.join(fwk, 'RCTI18nStrings.bundle'),
+    );
   }
   fs.rmSync(stage, {recursive: true, force: true});
   console.log(
     `headers-compose: React.framework spec layout -> ${slices.join(', ')} ` +
-      `(${plan.react.length} headers, umbrella ${plan.umbrella.length})`,
+      `(${plan.react.length} headers, umbrella ${plan.umbrella.length}` +
+      `${privacyManifest != null ? ', +PrivacyInfo.xcprivacy' : ''}` +
+      `${i18nLocales > 0 ? `, +RCTI18nStrings.bundle (${i18nLocales} locales)` : ''})`,
   );
 }
 

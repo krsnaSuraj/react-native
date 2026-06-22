@@ -224,10 +224,7 @@ ${binaryTargets}
 `;
 }
 
-function main(
-  argv /*:: ?: Array<string> */,
-  deps /*:: ?: {ensureHeadersLayout?: (string, string, string) => {reactXcfw: string, headersXcfw: string}} */,
-) /*: void */ {
+function main(argv /*:: ?: Array<string> */) /*: void */ {
   const args = parseArgs(argv ?? process.argv.slice(2));
   // Ensure appRoot is always absolute so path.join/path.resolve produce absolute paths
   // even when called with --app-root . or other relative paths.
@@ -307,27 +304,21 @@ function main(
     const xcfwLinksDir = path.join(appRoot, 'build', 'xcframeworks');
     fs.mkdirSync(xcfwLinksDir, {recursive: true});
 
-    // The spec layout (headers-spec.js) is what
-    // consumers compile against. When the slot's artifacts.json already
-    // carries ReactNativeHeaders (published or local tarball via
-    // download-spm-artifacts), the artifacts ship the layout and are used
-    // as-is. Otherwise the layout is COMPOSED locally from the slot's
-    // React + deps artifacts (binaries untouched; headers re-projected) —
-    // fast, marker-cached, re-run safe.
-    const rnPkgRoot = path.resolve(__dirname, '..', '..');
-    const overrides /*: {[string]: string} */ = {};
+    // Consumers compile against the spec layout (headers-spec.js, emitted at
+    // prebuild time). The prebuilt core artifact must ship React.xcframework AND
+    // ReactNativeHeaders.xcframework together — published tarballs and
+    // download-spm-artifacts include both. The layout is NOT composed on the
+    // consumer side (that needs the full RN repo / ios-prebuild build scripts,
+    // which the npm package deliberately does not ship).
     if (raw.ReactNativeHeaders == null) {
-      const ensureHeadersLayout =
-        deps?.ensureHeadersLayout ??
-        // $FlowFixMe[cannot-resolve-module] cross-dir require into ios-prebuild
-        require('../ios-prebuild/headers-compose').ensureHeadersLayout;
-      const composed = ensureHeadersLayout(
-        artifactsDir ?? path.dirname(String(raw.React?.xcframeworkPath ?? '')),
-        rnPkgRoot,
-        path.join(rnPkgRoot, 'build', 'headers'),
+      console.error(
+        'Prebuilt artifacts are missing ReactNativeHeaders.xcframework — the ' +
+          'React Native core artifact must ship it alongside React.xcframework. ' +
+          'Re-download or rebuild the artifact (or point --artifacts-dir at a ' +
+          'complete slot).',
       );
-      overrides.React = composed.reactXcfw;
-      overrides.ReactNativeHeaders = composed.headersXcfw;
+      process.exitCode = 1;
+      return;
     }
 
     const names /*: Array<string> */ = [];
@@ -346,10 +337,7 @@ function main(
     };
     // $FlowFixMe[incompatible-use] Object.entries values typed as mixed
     for (const [name, entry] of Object.entries(raw)) {
-      linkOne(name, overrides[name] ?? entry.xcframeworkPath);
-    }
-    if (overrides.ReactNativeHeaders != null) {
-      linkOne('ReactNativeHeaders', overrides.ReactNativeHeaders);
+      linkOne(name, entry.xcframeworkPath);
     }
 
     // Pass the absolute artifacts dir so the binary target paths reference the

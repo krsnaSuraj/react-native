@@ -157,7 +157,7 @@ describe('main', () => {
     return dir;
   }
 
-  function run(artifactsDir /*:: ?: ?string */, deps /*:: ?: Object */) {
+  function run(artifactsDir /*:: ?: ?string */) {
     const argv = [
       '--app-root',
       appRoot,
@@ -169,12 +169,11 @@ describe('main', () => {
     if (artifactsDir != null) {
       argv.push('--artifacts-dir', artifactsDir);
     }
-    main(argv, deps);
+    main(argv);
   }
 
   it('generates Package.swift + symlinks when headers ship in the slot', () => {
     writeAppPkg();
-    // ReactNativeHeaders present → the headers composer is never consulted.
     const artifactsDir = writeArtifacts([
       'React',
       'ReactNativeDependencies',
@@ -182,10 +181,8 @@ describe('main', () => {
       'ReactNativeHeaders',
     ]);
     try {
-      const ensureHeadersLayout = jest.fn();
-      run(artifactsDir, {ensureHeadersLayout});
+      run(artifactsDir);
 
-      expect(ensureHeadersLayout).not.toHaveBeenCalled();
       expect(process.exitCode).toBeUndefined();
 
       const pkgSwift = path.join(
@@ -213,46 +210,27 @@ describe('main', () => {
     }
   });
 
-  it('composes the headers layout when ReactNativeHeaders is absent', () => {
+  it('errors when ReactNativeHeaders is absent (no consumer-side compose)', () => {
     writeAppPkg();
+    // Artifacts WITHOUT ReactNativeHeaders: the consumer does not compose the
+    // layout locally, it fails with a clear error instead.
     const artifactsDir = writeArtifacts([
       'React',
       'ReactNativeDependencies',
       'hermes-engine',
     ]);
-    // Targets the injected composer points the React/headers symlinks at.
-    const composedReact = path.join(artifactsDir, 'composed-React.xcframework');
-    const composedHeaders = path.join(
-      artifactsDir,
-      'composed-ReactNativeHeaders.xcframework',
-    );
-    fs.mkdirSync(composedReact, {recursive: true});
-    fs.mkdirSync(composedHeaders, {recursive: true});
     try {
-      const ensureHeadersLayout = jest.fn(() => ({
-        reactXcfw: composedReact,
-        headersXcfw: composedHeaders,
-      }));
-      run(artifactsDir, {ensureHeadersLayout});
+      run(artifactsDir);
 
-      expect(ensureHeadersLayout).toHaveBeenCalledTimes(1);
-      expect(process.exitCode).toBeUndefined();
-
-      const headersLink = path.join(
-        appRoot,
-        'build',
-        'xcframeworks',
-        'ReactNativeHeaders.xcframework',
-      );
-      expect(fs.lstatSync(headersLink).isSymbolicLink()).toBe(true);
-      expect(fs.readlinkSync(headersLink)).toBe(composedHeaders);
-      // The React symlink is re-pointed at the composed override, not the raw entry.
+      expect(process.exitCode).toBe(1);
+      // No package is generated when the artifacts are incomplete.
       expect(
-        fs.readlinkSync(
-          path.join(appRoot, 'build', 'xcframeworks', 'React.xcframework'),
+        fs.existsSync(
+          path.join(appRoot, 'build', 'xcframeworks', 'Package.swift'),
         ),
-      ).toBe(composedReact);
+      ).toBe(false);
     } finally {
+      process.exitCode = undefined;
       fs.rmSync(artifactsDir, {recursive: true, force: true});
     }
   });

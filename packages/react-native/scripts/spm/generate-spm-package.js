@@ -235,11 +235,9 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   const projectRoot = findProjectRoot(appRoot);
   const pkgJson = readPackageJson(projectRoot);
   if (!pkgJson) {
-    console.error(
+    throw new Error(
       `[generate-spm-package] No package.json found in ${appRoot} or parent directories`,
     );
-    process.exitCode = 1;
-    return;
   }
 
   let rnRoot =
@@ -247,11 +245,9 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       ? path.resolve(args.reactNativeRoot)
       : resolveReactNativeRoot(appRoot, projectRoot);
   if (rnRoot == null) {
-    console.error(
+    throw new Error(
       '[generate-spm-package] Could not find react-native. Pass --react-native-root.',
     );
-    process.exitCode = 1;
-    return;
   }
 
   let version = args.version;
@@ -274,14 +270,10 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   if (artifactsDir != null) {
     const artifactsJsonPath = path.join(artifactsDir, 'artifacts.json');
     if (!fs.existsSync(artifactsJsonPath)) {
-      console.error(
-        `[generate-spm-package] --artifacts-dir specified but artifacts.json not found at: ${artifactsJsonPath}`,
+      throw new Error(
+        `[generate-spm-package] --artifacts-dir specified but artifacts.json not found at: ${artifactsJsonPath}\n` +
+          `  Run: node scripts/download-spm-artifacts.js --output "${artifactsDir}"`,
       );
-      console.error(
-        `  Run: node scripts/download-spm-artifacts.js --output "${artifactsDir}"`,
-      );
-      process.exitCode = 1;
-      return;
     }
 
     // $FlowFixMe[incompatible-type] JSON.parse returns any
@@ -292,14 +284,10 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     // entry here would surface only as "Missing package product" in Xcode.
     const missing = REQUIRED_ARTIFACTS.filter(name => raw[name] == null);
     if (missing.length > 0) {
-      console.error(
-        `[generate-spm-package] artifacts.json is missing required entries: ${missing.join(', ')}`,
+      throw new Error(
+        `[generate-spm-package] artifacts.json is missing required entries: ${missing.join(', ')}\n` +
+          `  Re-run with --force-download to refresh the cache slot at ${artifactsDir}`,
       );
-      console.error(
-        `  Re-run with --force-download to refresh the cache slot at ${artifactsDir}`,
-      );
-      process.exitCode = 1;
-      return;
     }
     const xcfwLinksDir = path.join(appRoot, 'build', 'xcframeworks');
     fs.mkdirSync(xcfwLinksDir, {recursive: true});
@@ -311,14 +299,12 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     // consumer side (that needs the full RN repo / ios-prebuild build scripts,
     // which the npm package deliberately does not ship).
     if (raw.ReactNativeHeaders == null) {
-      console.error(
+      throw new Error(
         'Prebuilt artifacts are missing ReactNativeHeaders.xcframework — the ' +
           'React Native core artifact must ship it alongside React.xcframework. ' +
-          'Re-download or rebuild the artifact (or point --artifacts-dir at a ' +
+          'Re-download or rebuild the artifact (or point --artifacts at a ' +
           'complete slot).',
       );
-      process.exitCode = 1;
-      return;
     }
 
     const names /*: Array<string> */ = [];
@@ -363,7 +349,12 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
 }
 
 if (require.main === module) {
-  main();
+  try {
+    main();
+  } catch (e) {
+    console.error(e.message);
+    process.exitCode = 1;
+  }
 }
 
 module.exports = {

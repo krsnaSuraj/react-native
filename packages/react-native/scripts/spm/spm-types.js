@@ -10,95 +10,28 @@
 
 /*::
 export type SetupArgs = {
-  action:
-    | 'init'
-    | 'update'
-    | 'sync'
-    | 'clean'
-    | 'codegen'
-    | 'download'
-    | 'scaffold'
-    | null,
+  action: 'add' | 'update' | 'deinit' | 'sync' | 'codegen' | 'download' | 'scaffold' | null,
   version: string | null,
-  localXcframework: string | null,
-  artifactsDir: string | null,
+  // Local artifact source (advanced). A `.xcframework` file → use it directly
+  // (no download); a directory → cache dir (read if populated, download there
+  // if empty). Replaces the old --local-xcframework + --artifacts-dir pair.
+  artifacts: string | null,
   flavor: string,
   skipCodegen: boolean,
-  skipDownload: boolean,
-  forceDownload: boolean,
-  skipXcodeproj: boolean,
-  forceXcodeproj: boolean,
-  bundleIdentifier: string | null,
+  // Artifact download policy: 'auto' fetches when missing, 'skip' never
+  // fetches, 'force' clears the cache slot and re-downloads.
+  downloadPolicy: 'auto' | 'skip' | 'force',
+  // `add` target selection: which app target (when several) and which project.
   productName: string | null,
-  entryFile: string | null,
-  // `clean` action scoping flags. Default (none set) keeps current behavior:
-  // only the generated dirs inside appRoot are removed. Each opt-in extends
-  // the deletion list:
-  //   cleanProject     → also the committed <App>-SPM.xcodeproj/ (prompts)
-  //   cleanDerivedData → also ~/Library/Developer/Xcode/DerivedData/<App>-SPM-*
-  //   cleanCache       → also the current cache slot under
-  //                      ~/Library/Caches/.../spm-artifacts/<slot>/<flavor>/
-  //   cleanAll         → enables all three at once
-  //   cleanYes         → skips the confirmation prompt for destructive scopes
-  cleanProject: boolean,
-  cleanDerivedData: boolean,
-  cleanCache: boolean,
-  cleanAll: boolean,
-  cleanYes: boolean,
-  // `init` xcodeproj strategy. Default is in-place injection: add SPM packages
-  // to the user's EXISTING xcodeproj so hand-tuned signing / capabilities /
-  // extra targets survive (falls back to from-scratch when the project can't
-  // be safely edited, e.g. CocoaPods-integrated). `fromScratch` forces the
-  // legacy generate-a-new-xcodeproj + rename-legacy path. `xcodeprojPath`
-  // overrides which existing project to inject into (disambiguates multiple).
-  fromScratch: boolean,
   xcodeprojPath: string | null,
+  // `add`: run `pod deintegrate` + strip RN from the Podfile before injecting.
+  // Also implied on the zero-arg path when resolveAction's safe-gate detects a
+  // freshly-scaffolded CocoaPods project (see setup-apple-spm.js).
+  deintegrate: boolean,
+  // Skip the single remaining confirmation (the add/update dirty-pbxproj
+  // warning). Non-TTY auto-proceeds regardless (git is the safety net).
+  yes: boolean,
 };
-
-// Result of in-place injection into an existing xcodeproj — recorded in the
-// `.spm-injected.json` sidecar so `clean` can revert and re-runs stay
-// idempotent.
-export type SpmInjectionResult = {
-  rootUuid: string,
-  target: string,
-  injectedUuids: Array<string>,
-};
-
-export type CleanOpts = {
-  project?: boolean,
-  derivedData?: boolean,
-  cache?: boolean,
-  // Absolute path to the cache slot to remove. Caller resolves this so the
-  // function stays I/O-pure and easily testable.
-  cacheSlotDir?: ?string,
-  // Override the derived-data root (only used by tests).
-  derivedDataRoot?: ?string,
-};
-
-// A clean target is either a path to delete, or a rename action (used by
-// `--project` to restore the `<App>.xcodeproj.legacy` backup when removing
-// the SPM-managed xcodeproj it lives alongside). Discriminate on `kind`.
-export type CleanTarget =
-  | {
-      kind: 'delete',
-      path: string,
-      label: string,
-    }
-  | {
-      kind: 'rename',
-      from: string,
-      to: string,
-      label: string,
-    }
-  // Revert an in-place-injected xcodeproj: `git checkout` the project dir
-  // (undoing the pbxproj/scheme edits) then drop the `.spm-injected.json`
-  // marker. `path` is the .xcodeproj dir; `appRoot` is the git cwd.
-  | {
-      kind: 'git-revert',
-      path: string,
-      appRoot: string,
-      label: string,
-    };
 
 export type DownloadArgs = {
   version: string | null,
@@ -300,31 +233,6 @@ export type GeneratePackageArgs = {
   sourcePath: string | null,
   iosVersion: string,
 };
-
-export type GenerateXcodeprojArgs = {
-  appRoot: string,
-  reactNativeRoot: string | null,
-  appName: string | null,
-  sourcePath: string | null,
-  iosVersion: string,
-  bundleIdentifier: string | null,
-  entryFile: string | null,
-};
-
-export type ProjectFiles = {
-  sources: Array<string>,
-  headers: Array<string>,
-  resources: Array<string>,
-  plists: Array<string>,
-};
-
-export type PbxprojEntry = {
-  uuid: string,
-  comment: string,
-  fields: {[string]: string},
-};
-
-export type PbxprojSections = {[string]: Array<PbxprojEntry>};
 
 // A preprocessor define lifted from a podspec's pod_target_xcconfig
 // (OTHER_CFLAGS `-D...` tokens + GCC_PREPROCESSOR_DEFINITIONS entries). `value`

@@ -10,11 +10,7 @@
 
 'use strict';
 
-/*:: import type {ProjectFiles, PbxprojSections} from './spm-types'; */
-
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 
 /**
  * Generate a deterministic 24-hex-character UUID from a seed string.
@@ -27,132 +23,6 @@ function generateUUID(seed /*: string */) /*: string */ {
     .digest('hex')
     .substring(0, 24)
     .toUpperCase();
-}
-
-const FILE_TYPE_MAP /*: {[string]: string} */ = {
-  '.m': 'sourcecode.c.objc',
-  '.mm': 'sourcecode.cpp.objcpp',
-  '.c': 'sourcecode.c.c',
-  '.cpp': 'sourcecode.cpp.cpp',
-  '.swift': 'sourcecode.swift',
-  '.h': 'sourcecode.c.h',
-  '.hpp': 'sourcecode.cpp.h',
-  '.plist': 'text.plist.xml',
-  '.storyboard': 'file.storyboard',
-  '.xib': 'file.xib',
-  '.xcassets': 'folder.assetcatalog',
-  '.bundle': '"wrapper.plug-in"',
-  '.xcprivacy': 'text.plist.xml',
-  '.png': 'image.png',
-  '.jpg': 'image.jpeg',
-  '.json': 'text.json',
-  '.js': 'sourcecode.javascript',
-  '.entitlements': 'text.plist.entitlements',
-};
-
-/**
- * Map a file extension to its Xcode file type identifier.
- */
-function fileTypeForExtension(ext /*: string */) /*: string */ {
-  return FILE_TYPE_MAP[ext] ?? 'file';
-}
-
-/**
- * Scans a source directory and categorizes files for xcodeproj generation.
- * Returns sources (.m, .mm, .swift, .cpp, .c), headers (.h),
- * resources (.xcassets, .storyboard, .bundle, .xcprivacy, .png), and plists (.plist).
- *
- * Paths returned are relative to sourceDir.
- */
-function scanProjectFiles(sourceDir /*: string */) /*: ProjectFiles */ {
-  const sources /*: Array<string> */ = [];
-  const headers /*: Array<string> */ = [];
-  const resources /*: Array<string> */ = [];
-  const plists /*: Array<string> */ = [];
-
-  const sourceExts = new Set(['.m', '.mm', '.swift', '.cpp', '.c']);
-  const headerExts = new Set(['.h', '.hpp']);
-  const resourceExts = new Set([
-    '.xcassets',
-    '.storyboard',
-    '.xib',
-    '.bundle',
-    '.xcprivacy',
-    '.png',
-    '.jpg',
-  ]);
-
-  // Directories that should never be walked into for app target sources:
-  // generated SPM output (build/), npm install state (node_modules/), and any
-  // sibling Xcode project bundles (*.xcodeproj). Without this, scanning an
-  // appRoot like `ios/` recursively picks up auto-generated `Package.swift`
-  // files under build/xcframeworks/, build/generated/ios/, etc. and shoves
-  // them into the xcodeproj's PBXSourcesBuildPhase — swiftc then refuses to
-  // compile multiple files named `Package.swift` in the same target.
-  const skipDirNames /*: Set<string> */ = new Set([
-    'build',
-    'node_modules',
-    'Pods',
-  ]);
-
-  // Test target dirs follow the Xcode convention `<AppName>Tests` and
-  // `<AppName>UITests`. Their .m / .swift files include <XCTest/XCTest.h>,
-  // which is only available to XCTest test targets — pulling them into the
-  // app target's source list breaks the build with "file not found".
-  // Skip-rule: case-insensitive ends-with "Tests" / "Test" / "UITests".
-  const isTestDir = (name /*: string */) /*: boolean */ =>
-    /(?:UI)?Tests?$/i.test(name);
-
-  function walk(dir /*: string */, relBase /*: string */) /*: void */ {
-    if (!fs.existsSync(dir)) {
-      return;
-    }
-    const entries /*: Array<{name: string, isDirectory(): boolean}> */ =
-      // $FlowFixMe[incompatible-type] Dirent typing
-      fs.readdirSync(dir, {withFileTypes: true});
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      // SPM manifest, never a target source — would collide with itself when
-      // multiple sibling sub-packages define their own Package.swift.
-      if (entry.name === 'Package.swift') {
-        continue;
-      }
-      const full = path.join(dir, entry.name);
-      const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
-      const ext = path.extname(entry.name);
-
-      if (entry.isDirectory()) {
-        // .xcassets and .bundle are treated as single resources, not walked into
-        if (ext === '.xcassets' || ext === '.bundle') {
-          resources.push(rel);
-        } else if (
-          skipDirNames.has(entry.name) ||
-          ext === '.xcodeproj' ||
-          ext === '.xcworkspace' ||
-          isTestDir(entry.name)
-        ) {
-          continue;
-        } else {
-          walk(full, rel);
-        }
-      } else {
-        if (sourceExts.has(ext)) {
-          sources.push(rel);
-        } else if (headerExts.has(ext)) {
-          headers.push(rel);
-        } else if (resourceExts.has(ext)) {
-          resources.push(rel);
-        } else if (ext === '.plist') {
-          plists.push(rel);
-        }
-      }
-    }
-  }
-
-  walk(sourceDir, '');
-  return {sources, headers, resources, plists};
 }
 
 /**
@@ -169,9 +39,8 @@ function quoteIfNeeded(s /*: string */) /*: string */ {
  * Serialize a single pbxproj object entry to its OpenStep text form,
  * including the leading `\t\t<uuid>` and trailing `};` but NO trailing
  * newline. Short entries (≤3 scalar fields) collapse to one line, matching
- * Xcode's own formatting. Shared by serializePbxproj (whole-file generation)
- * and the in-place injector (single-entry splicing) so both paths produce
- * byte-identical entry text.
+ * Xcode's own formatting. Used by the in-place injector to splice single
+ * entries into an existing project.
  */
 function serializeEntry(
   entry /*: {+uuid: string, +comment?: ?string, +fields: {+[string]: string}, ...} */,
@@ -199,70 +68,13 @@ function serializeEntry(
   return out;
 }
 
-/**
- * Serialize a sections object into Xcode's OpenStep ASCII plist format.
- *
- * sections is an object mapping section names (e.g. "PBXBuildFile") to
- * arrays of {uuid, comment, fields} entries. fields is an object mapping
- * field names to string values (already formatted for plist output).
- */
-function serializePbxproj(
-  archiveVersion /*: string */,
-  objectVersion /*: string */,
-  rootObjectUUID /*: string */,
-  sections /*: PbxprojSections */,
-) /*: string */ {
-  let out = `// !$*UTF8*$!\n{\n`;
-  out += `\tarchiveVersion = ${archiveVersion};\n`;
-  out += `\tclasses = {\n\t};\n`;
-  out += `\tobjectVersion = ${objectVersion};\n`;
-  out += `\tobjects = {\n\n`;
-
-  const sectionOrder = [
-    'PBXBuildFile',
-    'PBXFileReference',
-    'PBXFrameworksBuildPhase',
-    'PBXGroup',
-    'PBXNativeTarget',
-    'PBXProject',
-    'PBXResourcesBuildPhase',
-    'PBXShellScriptBuildPhase',
-    'PBXSourcesBuildPhase',
-    'XCBuildConfiguration',
-    'XCConfigurationList',
-    'XCLocalSwiftPackageReference',
-    'XCRemoteSwiftPackageReference',
-    'XCSwiftPackageProductDependency',
-  ];
-
-  for (const sectionName of sectionOrder) {
-    const entries = sections[sectionName];
-    if (!entries || entries.length === 0) {
-      continue;
-    }
-
-    out += `/* Begin ${sectionName} section */\n`;
-    for (const entry of entries) {
-      out += `${serializeEntry(entry)}\n`;
-    }
-    out += `/* End ${sectionName} section */\n\n`;
-  }
-
-  out += `\t};\n`;
-  out += `\trootObject = ${rootObjectUUID};\n`;
-  out += `}\n`;
-
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Surgical in-place pbxproj editing.
 //
-// The whole-file generator above writes a brand-new project. To ADD SPM
-// packages to a user's EXISTING project.pbxproj we instead splice new objects
-// and array members into the existing text by string anchors, leaving every
-// untouched byte identical (so the git diff is just the added lines). These
-// helpers operate on the raw OpenStep text — there is no AST. Quote-aware
+// To ADD SPM packages to a user's EXISTING project.pbxproj we splice new
+// objects and array members into the existing text by string anchors, leaving
+// every untouched byte identical (so the git diff is just the added lines).
+// These helpers operate on the raw OpenStep text — there is no AST. Quote-aware
 // delimiter matching lets them skip over field values (e.g. a shellScript
 // containing braces/parens) without miscounting.
 // ---------------------------------------------------------------------------
@@ -413,12 +225,6 @@ function findProjectObject(text /*: string */) /*: ObjectRange | null */ {
     return null;
   }
   return findObjectByUuid(text, m[1]);
-}
-
-/** The `objectVersion = NN;` value, or null. */
-function readObjectVersion(text /*: string */) /*: string | null */ {
-  const m = /\n\tobjectVersion = (\d+);/.exec(text);
-  return m != null ? m[1] : null;
 }
 
 /**
@@ -616,14 +422,125 @@ function ensureScalarField(
   const block = `\n${fieldIndent}${key} = ${value};`;
   return text.slice(0, obj.bodyOpen + 1) + block + text.slice(obj.bodyOpen + 1);
 }
+// ---------------------------------------------------------------------------
+// Surgical removal — the inverse of the additive helpers above. `deinit` uses
+// these to undo exactly what injection added, leaving every other byte (incl.
+// user edits made after injection) untouched. All are pure string transforms.
+// ---------------------------------------------------------------------------
+
+/**
+ * Remove the object whose UUID is `uuid` (its whole `\t\t<uuid> … = { … };`
+ * entry, single- or multi-line). No-op when the object is absent.
+ */
+function removeObjectByUuid(
+  text /*: string */,
+  uuid /*: string */,
+) /*: string */ {
+  const obj = findObjectByUuid(text, uuid);
+  if (obj == null) {
+    return text;
+  }
+  // Start at the newline preceding the entry's line; end just past its `;`.
+  // Leaving the trailing newline in place preserves it as the next entry's
+  // separator (byte-identical to never having inserted the line).
+  const start = text.lastIndexOf('\n', obj.bodyOpen);
+  let end = obj.bodyClose + 1; // past `}`
+  if (text[end] === ';') {
+    end++;
+  }
+  return text.slice(0, start) + text.slice(end);
+}
+
+/**
+ * Remove array-member lines (`\n\t+<uuid> /* … *​/,`) referencing any of
+ * `uuids` from every `( … )` list in the file (packageReferences,
+ * packageProductDependencies, a Frameworks phase's `files`, buildPhases, …).
+ * Only matches member lines (trailing comma), never the object-definition line
+ * (which ends in `= {`), so it composes safely with removeObjectByUuid.
+ */
+function removeArrayMembersByUuid(
+  text /*: string */,
+  uuids /*: $ReadOnlyArray<string> */,
+) /*: string */ {
+  let out = text;
+  for (const uuid of uuids) {
+    out = out.replace(
+      new RegExp(`\\n[\\t ]*${escapeRegExp(uuid)}\\b[^\\n]*,`, 'g'),
+      '',
+    );
+  }
+  return out;
+}
+
+/** Remove a whole `\n\t+key = value;` field from `obj`. No-op when absent. */
+function removeField(
+  text /*: string */,
+  obj /*: BodyRange */,
+  key /*: string */,
+) /*: string */ {
+  const f = findField(text, obj, key);
+  if (f == null) {
+    return text;
+  }
+  // f.matchStart points at the leading `\n`; f.tokenEnd points AT the `;`.
+  return text.slice(0, f.matchStart) + text.slice(f.tokenEnd + 1);
+}
+
+/**
+ * Remove specific raw string members from an existing `( … )` array field
+ * (inverse of addArrayStringValues' append branch). Leaves the field and any
+ * other members in place. No-op when the field or a value is absent.
+ */
+function removeArrayStringValues(
+  text /*: string */,
+  obj /*: BodyRange */,
+  key /*: string */,
+  values /*: $ReadOnlyArray<string> */,
+) /*: string */ {
+  const f = findField(text, obj, key);
+  if (f == null) {
+    return text;
+  }
+  let region = text.slice(f.valueStart, f.tokenEnd);
+  for (const val of values) {
+    region = region.replace(new RegExp(`\\n[\\t ]*${escapeRegExp(val)},`), '');
+  }
+  return text.slice(0, f.valueStart) + region + text.slice(f.tokenEnd);
+}
+
+/**
+ * Remove the empty `Pods` PBXGroup that `pod deintegrate` can leave behind in
+ * the navigator (build integration is already gone — xcconfigs/[CP] phases/
+ * linking — but the group lingers). Removes the group object AND its membership
+ * in any parent group. Only acts when the group is EMPTY (`children = ()`), so a
+ * still-integrated project (non-empty Pods group) is never touched. No-op when
+ * absent. PBXGroup bodies contain no nested braces, so `[^{}]` body matching is
+ * safe.
+ */
+function removeEmptyPodsGroup(text /*: string */) /*: string */ {
+  const m = /\n[\t ]*([0-9A-Fa-f]{24}) \/\* Pods \*\/ = \{[^{}]*?\};/.exec(
+    text,
+  );
+  if (m == null) {
+    return text;
+  }
+  const block = m[0];
+  if (
+    !/isa = PBXGroup;/.test(block) ||
+    !/children = \(\s*\);/.test(block) ||
+    !/\b(?:path|name) = Pods;/.test(block)
+  ) {
+    return text;
+  }
+  const uuid = m[1];
+  // Drop the parent group's child reference first, then the group object.
+  return removeObjectByUuid(removeArrayMembersByUuid(text, [uuid]), uuid);
+}
 
 module.exports = {
   generateUUID,
   namespacedUUID,
-  fileTypeForExtension,
-  scanProjectFiles,
   serializeEntry,
-  serializePbxproj,
   quoteIfNeeded,
   // Surgical-edit toolkit (in-place injection):
   scanString,
@@ -632,7 +549,6 @@ module.exports = {
   findField,
   findSection,
   findProjectObject,
-  readObjectVersion,
   findApplicationTargets,
   uuidsInArray,
   detectFieldIndent,
@@ -641,4 +557,10 @@ module.exports = {
   addArrayStringValues,
   ensureScalarField,
   escapeRegExp,
+  // Surgical removal (deinit):
+  removeObjectByUuid,
+  removeArrayMembersByUuid,
+  removeField,
+  removeArrayStringValues,
+  removeEmptyPodsGroup,
 };

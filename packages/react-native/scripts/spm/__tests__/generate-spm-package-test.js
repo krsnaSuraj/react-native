@@ -210,7 +210,7 @@ describe('main', () => {
     }
   });
 
-  it('errors when ReactNativeHeaders is absent (no consumer-side compose)', () => {
+  it('throws when ReactNativeHeaders is absent (no consumer-side compose)', () => {
     writeAppPkg();
     // Artifacts WITHOUT ReactNativeHeaders: the consumer does not compose the
     // layout locally, it fails with a clear error instead.
@@ -220,9 +220,7 @@ describe('main', () => {
       'hermes-engine',
     ]);
     try {
-      run(artifactsDir);
-
-      expect(process.exitCode).toBe(1);
+      expect(() => run(artifactsDir)).toThrow(/ReactNativeHeaders/);
       // No package is generated when the artifacts are incomplete.
       expect(
         fs.existsSync(
@@ -230,35 +228,31 @@ describe('main', () => {
         ),
       ).toBe(false);
     } finally {
-      process.exitCode = undefined;
       fs.rmSync(artifactsDir, {recursive: true, force: true});
     }
   });
 
-  it('exits 1 when no package.json is found', () => {
+  it('throws when no package.json is found', () => {
     // No app package.json written.
-    run(null);
-    expect(process.exitCode).toBe(1);
+    expect(() => run(null)).toThrow(/No package\.json/);
   });
 
-  it('exits 1 when --artifacts-dir has no artifacts.json', () => {
+  it('throws when --artifacts-dir has no artifacts.json', () => {
     writeAppPkg();
     const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-pkg-empty-'));
     try {
-      run(emptyDir);
-      expect(process.exitCode).toBe(1);
+      expect(() => run(emptyDir)).toThrow(/artifacts\.json not found/);
     } finally {
       fs.rmSync(emptyDir, {recursive: true, force: true});
     }
   });
 
-  it('exits 1 when artifacts.json is missing a required entry', () => {
+  it('throws when artifacts.json is missing a required entry', () => {
     writeAppPkg();
     // Missing hermes-engine.
     const artifactsDir = writeArtifacts(['React', 'ReactNativeDependencies']);
     try {
-      run(artifactsDir, {ensureHeadersLayout: jest.fn()});
-      expect(process.exitCode).toBe(1);
+      expect(() => run(artifactsDir)).toThrow(/missing required entries/);
     } finally {
       fs.rmSync(artifactsDir, {recursive: true, force: true});
     }

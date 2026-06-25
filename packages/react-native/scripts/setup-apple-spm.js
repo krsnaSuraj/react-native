@@ -10,71 +10,67 @@
 
 'use strict';
 
-/*:: import type {CleanOpts, CleanTarget, CliConfigJson, SetupArgs} from './spm/spm-types'; */
+/*:: import type {CliConfigJson, SetupArgs} from './spm/spm-types'; */
 
 /**
  * setup-apple-spm.js – Entry point for setting up Swift Package Manager support
- * in a React Native app using prebuilt XCFrameworks from Maven.
+ * in a React Native app using prebuilt XCFrameworks.
  *
- * Usage (from your app directory, e.g. packages/rn-tester):
+ * Usage (from your app directory):
  *   node node_modules/react-native/scripts/setup-apple-spm.js [action] [options]
+ *   (or `npx react-native spm [action]`)
  *
  * Actions:
- *   init                       First-time setup: generate sub-packages,
- *                              artifacts, and .xcodeproj. Adds SPM entries
- *                              to .gitignore.
- *   update                     Regenerate sub-packages/artifacts. Does NOT
- *                              touch <App>-SPM.xcodeproj (it's committed —
- *                              see below). Pass --force-xcodeproj to opt in.
- *   sync                       Lightweight sync invoked by the Xcode auto-sync
- *                              build phase: regenerates autolinking and
- *                              xcframeworks sub-packages and writes the
- *                              .spm-sync-stamp file. Skips .xcodeproj regen.
- *   clean                      Remove generated SPM state only.
- *   codegen                    Run only codegen and install the SPM template.
- *   download                   Download/check xcframework artifacts only.
+ *   add                        Inject SPM packages (package refs, build
+ *                              settings, the Sync build phase) into your
+ *                              existing .xcodeproj, in place. Idempotent.
+ *                              Default on first run. `--deintegrate` first
+ *                              runs `pod deintegrate` + strips React Native
+ *                              from the Podfile (CocoaPods → SPM migration).
+ *   update                     Re-run the pipeline and refresh the existing
+ *                              injection. Default once a project is injected.
+ *   deinit                     The exact inverse of `add`: surgically remove
+ *                              only what `add` injected (recorded in
+ *                              .spm-injected.json) and drop the marker.
+ *   scaffold                   Generate Package.swift for community deps that
+ *                              lack SPM support.
+ *   sync / codegen / download  Advanced/internal: `sync` is invoked by the
+ *                              generated Xcode build phase; `codegen` and
+ *                              `download` run a single pipeline step.
  *
- * With no action: defaults to update.
+ * Zero-arg `npx react-native spm` auto-detects: a freshly-scaffolded CocoaPods
+ * project (clean tree, stock Podfile) → `add --deintegrate`; an injected
+ * project → `update`; otherwise → `add` (fails loud on a CocoaPods project,
+ * directing you to `--deintegrate`).
  *
  * Options:
- *   --version <ver>             React Native version (e.g. 0.80.0). Defaults to
- *                               the version in node_modules/react-native/package.json
- *   --local-xcframework <path>  Use a local xcframework instead of downloading
- *   --artifacts-dir <path>      Override the artifact cache directory. Defaults to
- *                               ~/Library/Caches/ReactNative/spm-artifacts/{version}/{flavor}/
- *                               If checksums.json is missing, download-spm-artifacts.js runs automatically.
- *   --flavor <debug|release>    Artifact flavor (default: debug)
- *   --skip-codegen              Skip react-native codegen step
- *   --skip-download             Skip automatic artifact download even if checksums.json is missing
- *   --force-download            Clear cached artifacts and re-download from Maven
+ *   --version <ver>             React Native version (default: the resolved
+ *                               node_modules/react-native version).
+ *   --flavor <debug|release>    Artifact flavor (default: debug).
+ *   --yes                       Skip the dirty-pbxproj confirmation prompt.
+ *   [add] --xcodeproj <path>    Which .xcodeproj to inject into (when several).
+ *   [add] --product-name <name> Which app target to inject into (when several).
+ *   [add] --deintegrate         Run `pod deintegrate` + strip RN from the
+ *                               Podfile before injecting.
+ *   [advanced] --artifacts <path>          Local artifact source: a
+ *                               .xcframework → use it directly (no download);
+ *                               a directory → cache dir (read / download here).
+ *   [advanced] --download <auto|skip|force> Artifact policy (default: auto).
+ *   [advanced] --skip-codegen   Skip the react-native codegen step.
  *
- * Steps performed:
+ * Steps performed (add/update):
  *   1. react-native codegen → build/generated/ios/ + install SPM codegen template
  *   2. generate-spm-autolinking-config.js → build/generated/autolinking/autolinking.json
  *   3. generate-spm-autolinking.js → build/generated/autolinking/Package.swift
- *   4. download-spm-artifacts.js → <artifacts-dir>/ (skipped if already present)
+ *   4. download-spm-artifacts.js → cache dir (per --download policy)
  *   5. generate-spm-package.js → build/xcframeworks/Package.swift + symlinks
- *   6. generate-spm-xcodeproj.js → <AppName>-SPM.xcodeproj (create-if-missing;
- *                                  skipped with --skip-xcodeproj; opt back
- *                                  into overwrite with --force-xcodeproj)
+ *   6. inject SPM packages into the existing .xcodeproj (in place)
  *
- * Commit policy: <AppName>-SPM.xcodeproj is COMMITTED to your repo, like
- * the legacy <AppName>.xcodeproj. It holds your signing, capabilities,
- * Build Phases, schemes — edit it in Xcode the normal way. Its
- * XCLocalSwiftPackageReference entries point at three stable sub-package
- * paths under build/ (xcframeworks, generated/autolinking, generated/ios);
- * adding/removing community deps changes the contents of those sub-packages
- * (gitignored) and never requires regenerating the xcodeproj. No app-level
+ * The injection is committed with your project; its XCLocalSwiftPackageReference
+ * entries point at stable sub-package paths under build/ (xcframeworks,
+ * generated/autolinking, generated/ios), so adding/removing community deps
+ * changes those sub-packages (gitignored) and never re-injects. No app-level
  * Package.swift is generated or required.
- *
- * Legacy-xcodeproj migration: on `init`, if a CocoaPods-driven
- * <AppName>.xcodeproj exists alongside the SPM xcodeproj, `init` offers to
- * rename it to <AppName>.xcodeproj.legacy. The `.legacy` extension hides it
- * from the community CLI's findXcodeProject heuristic, so `npm run ios`
- * resolves to the SPM xcodeproj. Declining preserves both side-by-side;
- * `init` then patches the Podfile to pin CocoaPods to the legacy project.
- *
- * After running: open <AppName>-SPM.xcodeproj in Xcode.
  */
 
 const {
@@ -93,9 +89,9 @@ const {main: generatePackage} = require('./spm/generate-spm-package');
 const {findSourcePath} = require('./spm/generate-spm-package');
 const {
   SPM_INJECTED_MARKER,
-  SPM_MANAGED_MARKER,
+  cleanupLeftoverPodsGroup,
   injectSpmIntoExistingXcodeproj,
-  main: generateXcodeproj,
+  removeSpmInjection,
 } = require('./spm/generate-spm-xcodeproj');
 const {scaffoldAll} = require('./spm/scaffold-package-swift');
 const {
@@ -113,7 +109,6 @@ const {
 } = require('./spm/spm-utils');
 const {execFileSync} = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const yargs = require('yargs');
@@ -121,10 +116,10 @@ const yargs = require('yargs');
 const {log, warn: logError} = makeLogger('setup-apple-spm');
 
 const VALID_ACTIONS = new Set([
-  'init',
+  'add',
   'update',
+  'deinit',
   'sync',
-  'clean',
   'codegen',
   'download',
   'scaffold',
@@ -146,106 +141,56 @@ function parseArgs(argv /*: Array<string> */) /*: SetupArgs */ {
       type: 'string',
       choices: Array.from(VALID_ACTIONS),
       describe:
-        'Action to run: init, update, sync, clean, codegen, or download. Defaults to update.',
+        'Action to run: add, update, deinit, or scaffold. ' +
+        'Defaults to add (or update if SPM is already set up).',
     })
     .option('version', {
       type: 'string',
       describe:
         'React Native version (e.g. 0.80.0). Defaults to the version in node_modules/react-native/package.json',
     })
-    .option('local-xcframework', {
-      type: 'string',
-      describe: 'Use a local xcframework instead of downloading',
-    })
-    .option('artifacts-dir', {
-      type: 'string',
-      describe: 'Override the artifact cache directory',
-    })
     .option('flavor', {
       type: 'string',
       default: 'debug',
       describe: 'Artifact flavor (debug or release)',
     })
-    .option('skip-codegen', {
+    .option('yes', {
       type: 'boolean',
       default: false,
-      describe: 'Skip react-native codegen step',
-    })
-    .option('skip-download', {
-      type: 'boolean',
-      default: false,
-      describe:
-        'Skip automatic artifact download even if checksums.json is missing',
-    })
-    .option('force-download', {
-      type: 'boolean',
-      default: false,
-      describe: 'Clear cached artifacts and re-download from Maven',
-    })
-    .option('skip-xcodeproj', {
-      type: 'boolean',
-      default: false,
-      describe: 'Skip .xcodeproj generation step',
-    })
-    .option('force-xcodeproj', {
-      type: 'boolean',
-      default: false,
-      describe:
-        'Regenerate <App>-SPM.xcodeproj even if it already exists. WARNING: overwrites in-place Xcode edits (signing, capabilities, build phases). The xcodeproj is committed to your repo; SPM references stable sub-package paths under build/, so regeneration is not normally needed.',
-    })
-    .option('from-scratch', {
-      type: 'boolean',
-      default: false,
-      describe:
-        '[init] Generate a brand-new <App>.xcodeproj (renaming the existing one to .legacy) instead of injecting SPM into the existing project in place (the default).',
+      describe: 'Skip the dirty-pbxproj confirmation prompt',
     })
     .option('xcodeproj', {
       type: 'string',
       describe:
-        '[init] Path to the existing .xcodeproj to inject SPM packages into (disambiguates when several exist).',
-    })
-    .option('bundle-identifier', {
-      type: 'string',
-      describe: 'Override CFBundleIdentifier in generated Info.plist',
+        '[add] Path to the .xcodeproj to inject SPM packages into (disambiguates when several exist).',
     })
     .option('product-name', {
       type: 'string',
-      describe: 'Override PRODUCT_NAME in generated Info.plist',
+      describe:
+        '[add] App target to inject into (disambiguates when several exist).',
     })
-    .option('entry-file', {
+    .option('deintegrate', {
+      type: 'boolean',
+      default: false,
+      describe:
+        '[add] Run `pod deintegrate` + strip React Native from the Podfile before injecting (CocoaPods → SPM migration).',
+    })
+    .option('artifacts', {
       type: 'string',
       describe:
-        'JS entry file relative to app root (default: package.json "main" or index.js)',
+        '[advanced] Local artifact source: a .xcframework file (used directly, no download) or a directory (cache dir to read/download into).',
     })
-    // Scoping flags for the `clean` action. No-op for other actions.
-    .option('project', {
-      type: 'boolean',
-      default: false,
+    .option('download', {
+      type: 'string',
+      choices: ['auto', 'skip', 'force'],
+      default: 'auto',
       describe:
-        '[clean] Also remove the committed <App>-SPM.xcodeproj/ (will prompt for confirmation; bypass with --yes)',
+        '[advanced] Artifact download policy: auto (fetch if missing), skip (never fetch), force (clear cache + refetch).',
     })
-    .option('derived-data', {
+    .option('skip-codegen', {
       type: 'boolean',
       default: false,
-      describe:
-        "[clean] Also remove this app's Xcode DerivedData (~/Library/Developer/Xcode/DerivedData/<App>-SPM-*)",
-    })
-    .option('cache', {
-      type: 'boolean',
-      default: false,
-      describe:
-        '[clean] Also remove the cached xcframework slot for the current resolved version',
-    })
-    .option('all', {
-      type: 'boolean',
-      default: false,
-      describe: '[clean] Shorthand for --project --derived-data --cache',
-    })
-    .option('yes', {
-      type: 'boolean',
-      default: false,
-      describe:
-        '[clean] Skip the confirmation prompt for destructive scopes (--derived-data, --cache, --all)',
+      describe: '[advanced] Skip the react-native codegen step',
     })
     .usage(
       'Usage: $0 [action] [options]\n\nSets up Swift Package Manager support in a React Native app.',
@@ -272,24 +217,14 @@ function parseArgs(argv /*: Array<string> */) /*: SetupArgs */ {
   return {
     action: requestedAction,
     version: parsed.version ?? null,
-    localXcframework: parsed['local-xcframework'] ?? null,
-    artifactsDir: parsed['artifacts-dir'] ?? null,
+    artifacts: parsed.artifacts ?? null,
     flavor: parsed.flavor,
     skipCodegen: parsed['skip-codegen'],
-    skipDownload: parsed['skip-download'],
-    forceDownload: parsed['force-download'],
-    skipXcodeproj: parsed['skip-xcodeproj'],
-    forceXcodeproj: parsed['force-xcodeproj'],
-    fromScratch: parsed['from-scratch'],
-    xcodeprojPath: parsed.xcodeproj ?? null,
-    bundleIdentifier: parsed['bundle-identifier'] ?? null,
+    downloadPolicy: parsed.download,
     productName: parsed['product-name'] ?? null,
-    entryFile: parsed['entry-file'] ?? null,
-    cleanProject: parsed.project,
-    cleanDerivedData: parsed['derived-data'],
-    cleanCache: parsed.cache,
-    cleanAll: parsed.all,
-    cleanYes: parsed.yes,
+    xcodeprojPath: parsed.xcodeproj ?? null,
+    deintegrate: parsed.deintegrate,
+    yes: parsed.yes,
   };
 }
 
@@ -331,310 +266,6 @@ function ensureGitignoreSpmEntries(appRoot /*: string */) {
   log(`Updated .gitignore with SPM entries: ${missing.join(', ')}`);
 }
 
-// Enumerates clean targets. `--project` may emit a `rename` target restoring
-// `<App>.xcodeproj.legacy` alongside the SPM xcodeproj deletion.
-function gatherCleanTargets(
-  appRoot /*: string */,
-  opts /*:: ?: CleanOpts */ = {},
-) /*: Array<CleanTarget> */ {
-  const targets /*: Array<CleanTarget> */ = [];
-
-  // Always: the generated dirs inside appRoot (current "clean" behavior).
-  targets.push(
-    {
-      kind: 'delete',
-      path: path.join(appRoot, 'build', 'xcframeworks'),
-      label: 'build/xcframeworks/',
-    },
-    {
-      kind: 'delete',
-      path: path.join(appRoot, 'build', 'generated'),
-      label: 'build/generated/',
-    },
-    // Legacy location (pre-build/generated/autolinking move) — remove when
-    // present so old workspaces upgrade cleanly.
-    {
-      kind: 'delete',
-      path: path.join(appRoot, 'autolinked'),
-      label: 'autolinked/ (legacy)',
-    },
-    {
-      kind: 'delete',
-      path: path.join(appRoot, '.build'),
-      label: '.build/',
-    },
-  );
-
-  // Xcodeproj names drive both --project deletion and --derived-data
-  // discovery (DerivedData entries are prefixed by the xcodeproj base name).
-  const spmXcodeprojNames = listSpmXcodeprojs(appRoot).map(m => m.name);
-
-  if (opts.project === true) {
-    // In-place-injected (user-owned) project: revert via git + drop marker
-    // rather than delete — we never owned the whole project.
-    const injected = findInjectedXcodeproj(appRoot);
-    if (injected != null) {
-      targets.push({
-        kind: 'git-revert',
-        path: injected,
-        appRoot,
-        label: `${path.basename(injected)} (git restore + remove SPM injection)`,
-      });
-    }
-    for (const name of spmXcodeprojNames) {
-      targets.push({
-        kind: 'delete',
-        path: path.join(appRoot, name),
-        label: `${name}/`,
-      });
-      // If a `.legacy` backup sits alongside, restore it as the canonical
-      // `<App>.xcodeproj`. Only safe when we're also deleting the SPM
-      // xcodeproj that occupies that name — otherwise the rename would
-      // collide with the still-present SPM project. We're inside the
-      // `for (name of spmXcodeprojNames)` loop, so that invariant holds.
-      const legacyBackup = path.join(appRoot, `${name}.legacy`);
-      if (fs.existsSync(legacyBackup)) {
-        targets.push({
-          kind: 'rename',
-          from: legacyBackup,
-          to: path.join(appRoot, name),
-          label: `${name}.legacy/ → ${name}/  (restore CocoaPods xcodeproj)`,
-        });
-      }
-    }
-  }
-
-  if (opts.derivedData === true) {
-    const derivedRoot =
-      opts.derivedDataRoot ??
-      path.join(os.homedir(), 'Library', 'Developer', 'Xcode', 'DerivedData');
-    // Build app-name prefixes from the xcodeproj base names. We accept
-    // both `<App>-SPM-*` (old layout) and `<App>-*` (new layout) DerivedData
-    // entries. Trimming `.xcodeproj` is enough — Xcode names DerivedData
-    // dirs after the xcodeproj base name, not the target name.
-    const appNames = spmXcodeprojNames.map(n => n.replace(/\.xcodeproj$/, ''));
-    if (appNames.length > 0) {
-      try {
-        const ddEntries /*: Array<{name: string, isDirectory(): boolean}> */ =
-          // $FlowFixMe[incompatible-type] Dirent typing
-          fs.readdirSync(derivedRoot, {withFileTypes: true});
-        for (const entry of ddEntries) {
-          if (!entry.isDirectory()) continue;
-          for (const appName of appNames) {
-            if (entry.name.startsWith(`${appName}-`)) {
-              targets.push({
-                kind: 'delete',
-                path: path.join(derivedRoot, entry.name),
-                label: `~/Library/Developer/Xcode/DerivedData/${entry.name}/`,
-              });
-            }
-          }
-        }
-      } catch {
-        // DerivedData dir may not exist — that's fine
-      }
-    }
-  }
-
-  if (opts.cache === true && opts.cacheSlotDir != null) {
-    targets.push({
-      kind: 'delete',
-      path: opts.cacheSlotDir,
-      label: displayPath(opts.cacheSlotDir),
-    });
-  }
-
-  return targets;
-}
-
-function cleanGeneratedState(
-  appRoot /*: string */,
-  opts /*:: ?: CleanOpts */ = {},
-) /*: void */ {
-  const targets = gatherCleanTargets(appRoot, opts);
-  // Split into deletes and renames, filtering by source existence as we go.
-  // Run deletes BEFORE renames so the rename target slot is free (we'd
-  // otherwise rename `<App>.xcodeproj.legacy` → `<App>.xcodeproj` while the
-  // SPM `<App>.xcodeproj` still exists).
-  const deletes /*: Array<{path: string, label: string}> */ = [];
-  const renames /*: Array<{from: string, to: string, label: string}> */ = [];
-  const reverts /*: Array<{path: string, appRoot: string, label: string}> */ =
-    [];
-  for (const t of targets) {
-    if (t.kind === 'rename') {
-      if (fs.existsSync(t.from)) {
-        renames.push({from: t.from, to: t.to, label: t.label});
-      }
-    } else if (t.kind === 'git-revert') {
-      if (fs.existsSync(t.path)) {
-        reverts.push({path: t.path, appRoot: t.appRoot, label: t.label});
-      }
-    } else if (fs.existsSync(t.path)) {
-      deletes.push({path: t.path, label: t.label});
-    }
-  }
-  const total = deletes.length + renames.length + reverts.length;
-  if (total === 0) {
-    log('Nothing to clean.');
-    return;
-  }
-  log(`Cleaning ${total} action(s)...`);
-  for (const r of reverts) {
-    // git restore the project dir (reverts pbxproj + tracked scheme edits),
-    // then drop the untracked injection marker.
-    try {
-      execFileSync('git', ['checkout', '--', r.path], {
-        cwd: r.appRoot,
-        stdio: ['ignore', 'ignore', 'ignore'],
-      });
-    } catch {
-      logError(
-        `  Could not git-restore ${r.label} (not committed?). Remove the SPM ` +
-          `package references manually or restore from version control.`,
-      );
-    }
-    fs.rmSync(path.join(r.path, SPM_INJECTED_MARKER), {force: true});
-    log(`  ${r.label}`);
-  }
-  for (const d of deletes) {
-    fs.rmSync(d.path, {recursive: true, force: true});
-    log(`  Removed ${d.label}`);
-  }
-  for (const r of renames) {
-    fs.renameSync(r.from, r.to);
-    log(`  ${r.label}`);
-  }
-}
-
-/**
- * Prompts the user before running destructive scopes that touch state
- * outside `appRoot` (DerivedData, the user-global xcframework cache).
- * `--yes` skips the prompt; non-TTY stdin also auto-confirms so CI doesn't
- * hang.
- */
-/**
- * Inspects a Podfile and decides what (if anything) to insert. Returns null
- * when the file is missing, doesn't have a discoverable `target '...' do`
- * line, or ALREADY has a top-level `project '<...>.xcodeproj'` directive.
- * Otherwise returns the insertion point + the line we'd prepend before the
- * first target block.
- *
- * Without a `project` directive, CocoaPods refuses to auto-pick between
- * sibling xcodeprojs (`MyApp.xcodeproj` + `MyApp-SPM.xcodeproj`) with
- * "Could not automatically select an Xcode project". This is the most
- * common new-user footgun when SPM and CocoaPods coexist.
- */
-function podfileNeedsPatch(
-  podfilePath /*: string */,
-) /*: {content: string, insertAt: number} | null */ {
-  if (!fs.existsSync(podfilePath)) {
-    return null;
-  }
-  const content = fs.readFileSync(podfilePath, 'utf8');
-  // Already has a top-level `project '...'` directive (allow leading
-  // whitespace; pin to start-of-line for top-level). Skip.
-  if (/^project\s+['"][^'"]+\.xcodeproj['"]/m.test(content)) {
-    return null;
-  }
-  // Find the first `target '<name>' do` — the directive must come before.
-  const m = content.match(/^(?<indent>[ \t]*)target\s+['"][^'"]+['"]\s+do/m);
-  if (m == null || m.index == null) {
-    return null;
-  }
-  // Insertion point: start of the line containing the `target` directive.
-  // m.index points there because we anchored with `^` + multiline flag.
-  return {content, insertAt: m.index};
-}
-
-/**
- * Finds the legacy (non-SPM) `*.xcodeproj` in `appRoot` — the one
- * CocoaPods should integrate with. "Legacy" means: a `*.xcodeproj`
- * directory that is NOT SPM-managed. SPM-managed xcodeprojs are
- * identified by the `.spm-managed` sidecar marker (from-scratch) or the
- * `.spm-injected.json` marker (in-place injection), OR by the historical
- * `-SPM.xcodeproj` filename suffix (backward compat with older
- * generator output).
- */
-function findLegacyXcodeproj(appRoot /*: string */) /*: string | null */ {
-  let entries /*: Array<{name: string, isDirectory(): boolean}> */;
-  try {
-    // $FlowFixMe[incompatible-type] Dirent typing
-    entries = fs.readdirSync(appRoot, {withFileTypes: true});
-  } catch {
-    return null;
-  }
-  const candidates = entries
-    .filter(e => {
-      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs; always string in our usage.
-      const name /*: string */ = e.name;
-      if (
-        !e.isDirectory() ||
-        !name.endsWith('.xcodeproj') ||
-        name.endsWith('-SPM.xcodeproj')
-      ) {
-        return false;
-      }
-      // A `.spm-managed` (from-scratch) or `.spm-injected.json` (in-place)
-      // marker means this xcodeproj is ours — not a CocoaPods target to
-      // rename out of the way.
-      return (
-        !fs.existsSync(path.join(appRoot, name, SPM_MANAGED_MARKER)) &&
-        !fs.existsSync(path.join(appRoot, name, SPM_INJECTED_MARKER))
-      );
-    })
-    .map(e => {
-      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs; always string in our usage.
-      const name /*: string */ = e.name;
-      return name;
-    });
-  // Most projects have exactly one legacy xcodeproj. If multiple exist,
-  // pick the first deterministically — the prompt below shows the user
-  // which one we'll write and they can decline if it's wrong.
-  return candidates[0] ?? null;
-}
-
-/**
- * The community CLI's findXcodeProject scans for `*.xcodeproj` directories
- * and returns the first match. We rename the legacy to
- * `<App>.xcodeproj.legacy` so its extension becomes `.legacy` — invisible
- * to that heuristic, leaving the SPM project as the only candidate.
- */
-function decideLegacyMigration(
-  appRoot /*: string */,
-) /*: {kind: 'rename', from: string, to: string}
-     | {kind: 'skip-no-legacy'}
-     | {kind: 'skip-already-migrated', legacy: string}
-     | {kind: 'skip-conflict', from: string, to: string} */ {
-  const legacyName = findLegacyXcodeproj(appRoot);
-  if (legacyName == null) {
-    // No active `<App>.xcodeproj`. Maybe there's a `.legacy` from a prior
-    // migration — report it so callers can log appropriately.
-    let entries /*: Array<{name: string, isDirectory(): boolean}> */;
-    try {
-      // $FlowFixMe[incompatible-type] Dirent typing
-      entries = fs.readdirSync(appRoot, {withFileTypes: true});
-    } catch {
-      return {kind: 'skip-no-legacy'};
-    }
-    const alreadyMigrated = entries.find(e => {
-      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
-      const name /*: string */ = e.name;
-      return e.isDirectory() && name.endsWith('.xcodeproj.legacy');
-    });
-    if (alreadyMigrated != null) {
-      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
-      const name /*: string */ = alreadyMigrated.name;
-      return {kind: 'skip-already-migrated', legacy: name};
-    }
-    return {kind: 'skip-no-legacy'};
-  }
-  const backupName = `${legacyName}.legacy`;
-  if (fs.existsSync(path.join(appRoot, backupName))) {
-    return {kind: 'skip-conflict', from: legacyName, to: backupName};
-  }
-  return {kind: 'rename', from: legacyName, to: backupName};
-}
-
 /**
  * Single TTY-gated Y/N prompt helper used by every interactive confirmation
  * in this file. Non-TTY (CI / piped stdin) auto-confirms — every callsite
@@ -663,171 +294,18 @@ function promptYesNo(
   });
 }
 
-function confirmLegacyMigration(
-  from /*: string */,
-  to /*: string */,
-) /*: Promise<boolean> */ {
-  return promptYesNo(
-    `Rename ${from} → ${to} so \`npm run ios\` uses the SPM xcodeproj?`,
-    true,
-  );
-}
-
-/**
- * On `spm init`: if a legacy CocoaPods `<App>.xcodeproj` exists, offer to
- * rename it to `<App>.xcodeproj.legacy` so the SPM generator can write
- * the new `<App>.xcodeproj` (same filename) in the now-free slot. This is
- * what makes `npm run ios` resolve to the SPM xcodeproj unambiguously.
- *
- * Returns the new {from, to} names when a rename actually happened, so
- * the caller can emit a "to roll back" hint in next-steps. Returns null
- * when no rename occurred (no legacy / declined / already migrated /
- * conflict).
- */
-async function maybeMigrateLegacyXcodeproj(
-  args /*: SetupArgs */,
-  appRoot /*: string */,
-) /*: Promise<{from: string, to: string} | null> */ {
-  const decision = decideLegacyMigration(appRoot);
-  switch (decision.kind) {
-    case 'skip-no-legacy':
-      return null;
-    case 'skip-already-migrated':
-      log(
-        `Legacy ${decision.legacy} present (renamed by a prior \`spm init\`); ` +
-          `\`npm run ios\` resolves to the SPM xcodeproj.`,
-      );
-      return null;
-    case 'skip-conflict':
-      log(
-        `\x1b[33mFound both ${decision.from} and ${decision.to}.\x1b[0m ` +
-          `Skipping rename — resolve manually (remove one) before re-running init.`,
-      );
-      return null;
-    case 'rename': {
-      log('');
-      log(
-        `Found legacy CocoaPods ${decision.from}. The SPM xcodeproj uses the ` +
-          `same filename, so the legacy must be renamed first to free that ` +
-          `slot. The directory is preserved as ${decision.to} for rollback ` +
-          `(\`git mv\` tracks the rename cleanly).`,
-      );
-      log('');
-
-      const proceed = args.cleanYes
-        ? true
-        : await confirmLegacyMigration(decision.from, decision.to);
-      if (!proceed) {
-        // Refuse to continue — the next step (generateXcodeProject) would
-        // otherwise refuse anyway because the slot is taken by the legacy.
-        log(
-          `Skipped legacy rename. \`spm init\` cannot continue because the ` +
-            `legacy ${decision.from} occupies the slot the SPM xcodeproj ` +
-            `would use. Re-run init and accept the rename, or manually ` +
-            `rename to ${decision.to} first.`,
-        );
-        process.exitCode = 1;
-        throw new Error('Legacy rename declined — init cannot proceed');
-      }
-      fs.renameSync(
-        path.join(appRoot, decision.from),
-        path.join(appRoot, decision.to),
-      );
-      log(`Renamed: ${decision.from} → ${decision.to}`);
-      return {from: decision.from, to: decision.to};
-    }
-  }
-}
-
-function confirmPodfilePatch() /*: Promise<boolean> */ {
-  return promptYesNo('Add this `project` line to your Podfile now?', true);
-}
-
-/**
- * Detects the CocoaPods-vs-SPM ambiguity (Podfile + two sibling xcodeprojs)
- * and offers to patch the Podfile. Runs only on `init` — once the user has
- * declined we don't keep nagging on every `update`.
- */
-async function maybePatchPodfile(
-  args /*: SetupArgs */,
-  appRoot /*: string */,
-) /*: Promise<void> */ {
-  const podfilePath = path.join(appRoot, 'Podfile');
-  const needs = podfileNeedsPatch(podfilePath);
-  if (needs == null) {
-    return;
-  }
-  const legacyXcodeproj = findLegacyXcodeproj(appRoot);
-  if (legacyXcodeproj == null) {
-    return;
-  }
-
-  log('');
-  log(
-    'Detected Podfile without an explicit `project` directive. ` pod install` ' +
-      'will refuse to choose between the legacy and SPM xcodeprojs in this dir ' +
-      `(error: "Could not automatically select an Xcode project").`,
-  );
-  log('');
-  log(`I can add this line to ${path.relative(appRoot, podfilePath)}:`);
-  log('');
-  log(`    project '${legacyXcodeproj}'`);
-  log('');
-  log(
-    `This pins CocoaPods to ${legacyXcodeproj} so it leaves the auto-generated ` +
-      `SPM xcodeproj alone.`,
-  );
-  log('');
-
-  const proceed = args.cleanYes ? true : await confirmPodfilePatch();
-  if (!proceed) {
-    log('Skipped Podfile patch. Add the line manually if `pod install` fails.');
-    return;
-  }
-
-  // Insert the directive immediately before the first `target ... do` line,
-  // with a brief explanatory comment so a reader knows why it's there.
-  const insertion =
-    `# Pin CocoaPods to ${legacyXcodeproj} so it doesn't pick the ` +
-    `auto-generated <App>-SPM.xcodeproj.\n` +
-    `# Added by \`npx react-native spm init\`.\n` +
-    `project '${legacyXcodeproj}'\n\n`;
-  const patched =
-    needs.content.slice(0, needs.insertAt) +
-    insertion +
-    needs.content.slice(needs.insertAt);
-  fs.writeFileSync(podfilePath, patched, 'utf8');
-  log(
-    `Patched ${path.relative(appRoot, podfilePath)} with project '${legacyXcodeproj}'.`,
-  );
-}
-
-function confirmDestructive(
-  targets /*: Array<CleanTarget> */,
-) /*: Promise<boolean> */ {
-  log('');
-  log('About to remove:');
-  for (const t of targets) {
-    log(`  - ${t.label}`);
-  }
-  log('');
-  return promptYesNo('Proceed?', false);
-}
-
 function resolveAction(
   requestedAction /*: SetupArgs['action'] */,
   appRoot /*: string */,
-) /*: 'init' | 'update' | 'sync' | 'clean' | 'codegen' | 'download' | 'scaffold' */ {
+) /*: 'add' | 'update' | 'deinit' | 'sync' | 'codegen' | 'download' | 'scaffold' */ {
   if (requestedAction != null) {
     return requestedAction;
   }
-  // Auto-detect first-run: if no `<App>-SPM.xcodeproj/` exists yet, the user
-  // has never run init in this app — treat the implicit action as `init`.
-  // This is what triggers one-time setup steps (gitignore entries, the
-  // legacy-xcodeproj migration prompt, the Podfile patch). After the first
-  // run, the SPM xcodeproj is present and subsequent invocations default to
-  // `update` (sub-package regen only, no first-time setup).
-  return findExistingSpmXcodeproj(appRoot) != null ? 'update' : 'init';
+  // Zero-arg default. Once SPM has been injected, default to `update` (regen +
+  // refresh). Otherwise it's a first run → `add`. Whether `add` should imply
+  // `--deintegrate` (fresh CocoaPods project) is decided by the safe-gate in
+  // main(), which only applies on this implicit path.
+  return findInjectedXcodeproj(appRoot) != null ? 'update' : 'add';
 }
 
 /**
@@ -867,27 +345,6 @@ function detectStandardRnLayoutRedirect(
     return null;
   }
   return iosSubdir;
-}
-
-/**
- * Builds the JS-root-mismatch refuse-message. Used by `clean`, which doesn't
- * auto-redirect (destructive scopes shouldn't silently retarget).
- */
-function formatRnRootMismatchMessage(
-  projectRoot /*: string */,
-  iosSubdir /*: string */,
-) /*: string */ {
-  return (
-    `Detected standard RN layout: package.json at ${displayPath(projectRoot)}, ` +
-    `iOS project at ${displayPath(iosSubdir)}.\n\n` +
-    `Please run from the ios/ subdirectory:\n\n` +
-    `  cd ios && npx react-native spm <action>\n\n` +
-    `Running from the JS root would write SPM artifacts at the wrong location and ` +
-    `the autolinker would silently skip every npm native dependency (the community ` +
-    `CLI writes autolinking.json under <project>/ios/build/generated/autolinking/, ` +
-    `but this script would read it from <project>/build/generated/autolinking/). ` +
-    `The build would succeed but native modules would fail at runtime.`
-  );
 }
 
 function resolveReactNativeRoot(
@@ -1036,22 +493,37 @@ async function runScaffold(
   }
 }
 
+// `--artifacts <path>` (advanced) is shape-detected: a `.xcframework` file is a
+// local xcframework to use directly (no download); a directory is a cache-dir
+// override (read if populated, download there if empty).
+function localXcframeworkArg(args /*: SetupArgs */) /*: string | null */ {
+  return args.artifacts != null && args.artifacts.endsWith('.xcframework')
+    ? args.artifacts
+    : null;
+}
+function artifactsDirArg(args /*: SetupArgs */) /*: string | null */ {
+  return args.artifacts != null && !args.artifacts.endsWith('.xcframework')
+    ? args.artifacts
+    : null;
+}
+
 function prepareLocalXcframeworkArtifacts(
   args /*: SetupArgs */,
   appRoot /*: string */,
   version /*: string */,
 ) /*: string | null */ {
-  if (args.localXcframework == null || args.artifactsDir != null) {
-    return args.artifactsDir;
+  const localXcframework = localXcframeworkArg(args);
+  if (localXcframework == null) {
+    return artifactsDirArg(args);
   }
 
-  const localReactPath = path.resolve(args.localXcframework);
+  const localReactPath = path.resolve(localXcframework);
   if (
     !localReactPath.endsWith('.xcframework') ||
     !fs.existsSync(localReactPath)
   ) {
     throw new Error(
-      `--local-xcframework path does not exist or is not an .xcframework: ${localReactPath}`,
+      `--artifacts path does not exist or is not an .xcframework: ${localReactPath}`,
     );
   }
   const localXcfwDir = path.resolve(localReactPath, '..');
@@ -1102,17 +574,17 @@ async function ensureArtifacts(
       ? path.resolve(artifactsDir)
       : defaultCacheDir(slotVersion, args.flavor);
 
-  if (args.forceDownload && resolvedArtifactsDir != null) {
-    log('Clearing cached artifacts (--force-download)...');
+  if (args.downloadPolicy === 'force' && resolvedArtifactsDir != null) {
+    log('Clearing cached artifacts (--download force)...');
     fs.rmSync(resolvedArtifactsDir, {recursive: true, force: true});
   }
 
   if (resolvedArtifactsDir == null) {
-    log('No --artifacts-dir set, skipping download step');
+    log('No artifacts directory resolved, skipping download step');
     return resolvedArtifactsDir;
   }
-  if (args.skipDownload) {
-    log('Skipping artifact download (--skip-download)');
+  if (args.downloadPolicy === 'skip') {
+    log('Skipping artifact download (--download skip)');
     return resolvedArtifactsDir;
   }
 
@@ -1156,8 +628,9 @@ function generateXcframeworksPackage(
     '--version',
     version,
   ];
-  if (args.localXcframework != null) {
-    packageArgs.push('--local-xcframework', args.localXcframework);
+  const localXcframework = localXcframeworkArg(args);
+  if (localXcframework != null) {
+    packageArgs.push('--local-xcframework', localXcframework);
   }
   if (resolvedArtifactsDir != null) {
     packageArgs.push('--artifacts-dir', resolvedArtifactsDir);
@@ -1165,198 +638,243 @@ function generateXcframeworksPackage(
   generatePackage(packageArgs);
 }
 
-function generateXcodeProject(
-  args /*: SetupArgs */,
-  appRoot /*: string */,
-  reactNativeRoot /*: string */,
-) {
-  if (args.skipXcodeproj) {
-    log('Skipping .xcodeproj generation (--skip-xcodeproj)');
-    return;
+// True when the chosen pbxproj is still CocoaPods-integrated (its build configs
+// layer a `Pods-*.xcconfig`) — the real blocker for SPM injection.
+function pbxprojUsesCocoaPods(xcodeprojPath /*: string */) /*: boolean */ {
+  try {
+    const t = fs.readFileSync(
+      path.join(xcodeprojPath, 'project.pbxproj'),
+      'utf8',
+    );
+    return /\bPods[-/][^\n]*\.xcconfig\b/.test(t);
+  } catch {
+    return false;
   }
+}
 
-  // Safety: the generator writes `<App>.xcodeproj` (same filename as the
-  // legacy CocoaPods project). If a legacy is sitting in that slot AND no
-  // SPM-managed marker is present, generation would silently overwrite the
-  // user's CocoaPods project. Refuse and ask them to accept the migration
-  // prompt (which renames legacy → `<App>.xcodeproj.legacy` first).
-  const legacy = findLegacyXcodeproj(appRoot);
-  if (legacy != null) {
+// True when the Podfile still declares React Native integration — a latent
+// landmine even after `pod deintegrate` (a future `pod install` re-breaks the
+// SPM graph). Warned about (not refused) once the pbxproj itself is clean.
+function podfileHasRnIntegration(appRoot /*: string */) /*: boolean */ {
+  const podfilePath = path.join(appRoot, 'Podfile');
+  if (!fs.existsSync(podfilePath)) {
+    return false;
+  }
+  return /use_react_native!|use_native_modules!|prepare_react_native_project!/.test(
+    fs.readFileSync(podfilePath, 'utf8'),
+  );
+}
+
+// True when the Podfile declares any explicit `pod '...'` (third-party pods).
+function podfileHasThirdPartyPods(appRoot /*: string */) /*: boolean */ {
+  const podfilePath = path.join(appRoot, 'Podfile');
+  if (!fs.existsSync(podfilePath)) {
+    return false;
+  }
+  return /^\s*pod\s+['"]/m.test(fs.readFileSync(podfilePath, 'utf8'));
+}
+
+// The zero-arg "fresh project" safe-gate: auto-`add --deintegrate` ONLY when it
+// is provably safe — a first-run CocoaPods RN project with a stock Podfile (no
+// third-party pods) whose pbxproj AND Podfile are git-tracked and clean, so the
+// conversion is fully revertible. We check only the two files `deintegrate`
+// mutates (not the whole tree) — a fresh app typically has a dirty
+// node_modules/lockfile/patches after `npm install` + `spm scaffold`, none of
+// which affect the revertibility of the CocoaPods → SwiftPM conversion.
+// Otherwise false → strict `add` (which fails loud on a CocoaPods project).
+function shouldAutoDeintegrate(
+  appRoot /*: string */,
+  xcodeprojPath /*: string | null */,
+) /*: boolean */ {
+  if (xcodeprojPath == null || !pbxprojUsesCocoaPods(xcodeprojPath)) {
+    return false;
+  }
+  if (podfileHasThirdPartyPods(appRoot)) {
+    return false;
+  }
+  const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
+  if (gitTrackedAndClean(appRoot, pbxprojPath) !== true) {
+    return false;
+  }
+  const podfilePath = path.join(appRoot, 'Podfile');
+  if (
+    fs.existsSync(podfilePath) &&
+    gitTrackedAndClean(appRoot, podfilePath) !== true
+  ) {
+    return false;
+  }
+  return true;
+}
+
+// Run `pod deintegrate` then strip React Native from the Podfile (leaving any
+// non-RN pods). Requires CocoaPods on PATH (fail-loud otherwise). Flag-gated ⇒
+// no prompt ⇒ CI-safe. Does NOT touch the .xcworkspace.
+function runDeintegrate(appRoot /*: string */) /*: void */ {
+  try {
+    execFileSync('pod', ['--version'], {stdio: 'ignore'});
+  } catch {
     logError(
-      `Refusing to generate .xcodeproj: ${legacy} appears to be a legacy ` +
-        `CocoaPods project. Re-run \`spm init\` and accept the rename prompt ` +
-        `(or manually rename to ${legacy}.legacy) before the SPM xcodeproj ` +
-        `can take its slot.`,
+      '`--deintegrate` needs CocoaPods (`pod`) on PATH. Remove the React ' +
+        'Native integration from your project manually, then run `spm add`.',
     );
     process.exitCode = 1;
-    throw new Error('Legacy xcodeproj would be overwritten');
+    throw new Error('pod not found');
   }
+  log('Running `pod deintegrate`...');
+  execFileSync('pod', ['deintegrate'], {cwd: appRoot, stdio: 'inherit'});
 
-  // The xcodeproj is committed; its XCLocalSwiftPackageReference entries
-  // point at three stable sub-package paths under build/, so adding/removing
-  // community deps never requires regenerating it. Regenerate only when
-  // missing (fresh clone / first init) or when the user explicitly opts in
-  // via --force-xcodeproj.
-  const existing = findExistingSpmXcodeproj(appRoot);
-  if (existing != null && !args.forceXcodeproj) {
-    log(
-      `Found existing ${path.basename(existing)}; skipping regeneration ` +
-        `(pass --force-xcodeproj to overwrite, e.g. after deleting it).`,
-    );
-    return;
+  const podfilePath = path.join(appRoot, 'Podfile');
+  if (fs.existsSync(podfilePath)) {
+    const orig = fs.readFileSync(podfilePath, 'utf8');
+    const stripped = orig
+      .split('\n')
+      .filter(
+        l =>
+          !/use_react_native!|use_native_modules!|prepare_react_native_project!/.test(
+            l,
+          ),
+      )
+      .join('\n');
+    if (stripped !== orig) {
+      fs.writeFileSync(podfilePath, stripped, 'utf8');
+      log('Stripped React Native integration from Podfile.');
+    }
   }
+}
 
-  log(
-    existing != null
-      ? `Regenerating .xcodeproj (--force-xcodeproj will overwrite Xcode-side edits)...`
-      : 'Generating .xcodeproj...',
-  );
-  const xcodeprojArgs = [
-    '--app-root',
-    appRoot,
-    '--react-native-root',
-    reactNativeRoot,
-  ];
-  if (args.bundleIdentifier != null) {
-    xcodeprojArgs.push('--bundle-identifier', args.bundleIdentifier);
+// Pick the .xcodeproj to inject into: --xcodeproj override > a prior in-place
+// target (re-run) > the single .xcodeproj in appRoot. Returns an error string
+// (ambiguous / none) so the caller fails loud.
+function resolveInjectionTarget(
+  args /*: SetupArgs */,
+  appRoot /*: string */,
+) /*: {path: string, error?: void} | {error: string, path?: void} */ {
+  if (args.xcodeprojPath != null) {
+    const p = path.resolve(appRoot, args.xcodeprojPath);
+    return fs.existsSync(p)
+      ? {path: p}
+      : {error: `--xcodeproj not found: ${p}`};
   }
-  if (args.productName != null) {
-    xcodeprojArgs.push('--app-name', args.productName);
+  const injected = findInjectedXcodeproj(appRoot);
+  if (injected != null) {
+    return {path: injected};
   }
-  if (args.entryFile != null) {
-    xcodeprojArgs.push('--entry-file', args.entryFile);
+  const names /*: Array<string> */ = [];
+  let entries /*: Array<{name: string, isDirectory(): boolean}> */ = [];
+  try {
+    // $FlowFixMe[incompatible-type] Dirent typing
+    entries = fs.readdirSync(appRoot, {withFileTypes: true});
+  } catch {}
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
+    const name /*: string */ = entry.name;
+    if (name.endsWith('.xcodeproj')) {
+      names.push(name);
+    }
   }
-  generateXcodeproj(xcodeprojArgs);
+  if (names.length === 0) {
+    return {
+      error:
+        'no .xcodeproj found. Create an app first (e.g. `npx ' +
+        '@react-native-community/cli init`) or make one in Xcode, then `spm add`.',
+    };
+  }
+  if (names.length > 1) {
+    return {
+      error: `multiple .xcodeproj found (${names.join(', ')}); pass --xcodeproj to pick one.`,
+    };
+  }
+  return {path: path.join(appRoot, names[0])};
 }
 
 /**
- * Decide and run the xcodeproj strategy. The DEFAULT is in-place injection:
- * add SPM packages to the user's EXISTING xcodeproj so their signing,
- * capabilities, and extra targets survive. Falls back to (or is forced via
- * `--from-scratch` into) the legacy generate-a-new-project + rename-legacy
- * path when the project can't be safely edited or none exists.
- *
- * Returns the {from, to} legacy rename when one happened (from-scratch only),
- * else null — used for the rollback hint in next-steps.
+ * Inject SPM packages into the user's existing .xcodeproj, in place — the only
+ * xcodeproj strategy (`add` and `update` both run this; there is no
+ * from-scratch generation). Fails loud rather than silently retargeting. With
+ * `--deintegrate`, removes CocoaPods first.
  */
 async function setupXcodeproj(
   args /*: SetupArgs */,
   appRoot /*: string */,
   reactNativeRoot /*: string */,
-  action /*: string */,
-) /*: Promise<{from: string, to: string} | null> */ {
-  if (args.skipXcodeproj) {
-    log('Skipping .xcodeproj setup (--skip-xcodeproj)');
-    return null;
+) /*: Promise<void> */ {
+  const target = resolveInjectionTarget(args, appRoot);
+  if (target.error != null) {
+    logError(`Cannot set up SPM: ${target.error}`);
+    process.exitCode = 1;
+    throw new Error(target.error);
   }
+  const xcodeprojPath = target.path;
+  const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
 
-  // A previously generated from-scratch SPM project keeps using from-scratch.
-  // In-place injection runs on `init` (first setup) or whenever a prior
-  // in-place target exists (re-run on update keeps it idempotent).
-  const existingSpm = findExistingSpmXcodeproj(appRoot);
-  const injectedName = findInjectedXcodeproj(appRoot);
-  const inPlace =
-    !args.fromScratch &&
-    existingSpm == null &&
-    (action === 'init' || injectedName != null);
+  // Snapshot the pbxproj's git state BEFORE deintegrate — `pod deintegrate`
+  // rewrites it (removing the Pods xcconfig layering), so checking afterward
+  // would always look dirty and trigger a spurious confirmation prompt.
+  const cleanBeforeEdits = gitTrackedAndClean(appRoot, pbxprojPath);
 
-  if (inPlace) {
-    // Pick the project to inject into: explicit override > a prior in-place
-    // target (re-run) > the user's existing (legacy) project (init only).
-    const legacyName = action === 'init' ? findLegacyXcodeproj(appRoot) : null;
-    const xcodeprojPath =
-      args.xcodeprojPath != null
-        ? path.resolve(appRoot, args.xcodeprojPath)
-        : (injectedName ??
-          (legacyName != null ? path.join(appRoot, legacyName) : null));
-
-    if (xcodeprojPath != null && fs.existsSync(xcodeprojPath)) {
-      // No backup is made — git is the safety net. Refuse on a dirty/untracked
-      // pbxproj unless --yes (so a bad inject is always `git checkout`-able).
-      const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
-      const clean = gitTrackedAndClean(appRoot, pbxprojPath);
-      if (clean === false && !args.cleanYes) {
-        const proceed = await promptYesNo(
-          `${path.basename(xcodeprojPath)} has uncommitted changes and no ` +
-            `backup is made (git is the only undo). Inject SPM packages anyway?`,
-          false,
-        );
-        if (!proceed) {
-          log('Aborted. Commit or stash the project, then re-run `spm init`.');
-          process.exitCode = 1;
-          throw new Error('In-place injection declined (dirty working tree)');
-        }
-      } else if (clean === null) {
-        log(
-          `\x1b[33mNote: ${path.basename(xcodeprojPath)} is not in a git ` +
-            `repo — no backup is made before in-place injection.\x1b[0m`,
-        );
-      }
-
-      const result = injectSpmIntoExistingXcodeproj({
-        appRoot,
-        reactNativeRoot,
-        xcodeprojPath,
-        appName: args.productName,
-      });
-      if (result.status === 'injected') {
-        return null;
-      }
-      log(
-        `In-place injection not possible (${result.reason}); ` +
-          `falling back to generating a new xcodeproj.`,
-      );
-      // fall through to from-scratch below
-    }
-    // No existing project to inject into → from-scratch generates one.
-  }
-
-  // From-scratch: on init, rename any legacy CocoaPods project first so the
-  // generated project can take the `<App>.xcodeproj` slot. On update/scaffold
-  // the project already exists (generateXcodeProject skips unless --force).
-  let rename = null;
-  if (action === 'init') {
-    rename = await maybeMigrateLegacyXcodeproj(args, appRoot);
-  }
-  generateXcodeProject(args, appRoot, reactNativeRoot);
-  return rename;
-}
-
-/**
- * Lists every SPM-managed xcodeproj directly inside `appRoot`. A xcodeproj
- * is SPM-managed if it carries the `.spm-managed` sidecar marker or if its
- * name still has the legacy `-SPM.xcodeproj` suffix (backward compat).
- */
-function listSpmXcodeprojs(
-  appRoot /*: string */,
-) /*: Array<{name: string, absPath: string, hasMarker: boolean}> */ {
-  let entries /*: Array<{name: string, isDirectory(): boolean}> */;
-  try {
-    // $FlowFixMe[incompatible-type] Dirent typing
-    entries = fs.readdirSync(appRoot, {withFileTypes: true});
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
-    const name /*: string */ = entry.name;
-    if (!name.endsWith('.xcodeproj')) continue;
-    const absPath = path.join(appRoot, name);
-    const hasMarker = fs.existsSync(path.join(absPath, SPM_MANAGED_MARKER));
-    if (hasMarker || name.endsWith('-SPM.xcodeproj')) {
-      out.push({name, absPath, hasMarker});
+  if (args.deintegrate) {
+    runDeintegrate(appRoot);
+    // `pod deintegrate` strips the build integration but can leave an empty
+    // `Pods` group in the navigator — remove it so the converted project is
+    // visually clean.
+    if (cleanupLeftoverPodsGroup(xcodeprojPath)) {
+      log('Removed the leftover empty `Pods` group from the project.');
     }
   }
-  return out;
-}
 
-// Returns the marker-tagged xcodeproj if any, else the first suffix-tagged
-// fallback, else null. Used by the create-if-missing branch and resolveAction.
-function findExistingSpmXcodeproj(appRoot /*: string */) /*: string | null */ {
-  const matches = listSpmXcodeprojs(appRoot);
-  return (matches.find(m => m.hasMarker) ?? matches[0])?.absPath ?? null;
+  // Preflight: a still-CocoaPods-integrated pbxproj is the real build-breaker.
+  if (pbxprojUsesCocoaPods(xcodeprojPath)) {
+    logError(
+      `${path.basename(xcodeprojPath)} is CocoaPods-integrated. Re-run ` +
+        '`spm add --deintegrate` to convert it (runs `pod deintegrate` + ' +
+        'strips React Native from the Podfile), or run `pod deintegrate` ' +
+        'yourself first. Side-by-side non-RN pods are fine.',
+    );
+    process.exitCode = 1;
+    throw new Error('CocoaPods-integrated project');
+  }
+  if (podfileHasRnIntegration(appRoot)) {
+    log(
+      '\x1b[33mNote: your Podfile still declares React Native integration. ' +
+        'Remove it and avoid `pod install`, or it will re-break the SPM ' +
+        'package graph.\x1b[0m',
+    );
+  }
+
+  // No backup is made — git is the safety net. Refuse on a dirty/untracked
+  // pbxproj (as it was BEFORE any deintegrate edits) unless --yes, so a bad
+  // inject is always `git checkout`-able.
+  const clean = cleanBeforeEdits;
+  if (clean === false && !args.yes) {
+    const proceed = await promptYesNo(
+      `${path.basename(xcodeprojPath)} has uncommitted changes and no ` +
+        `backup is made (git is the only undo). Inject SPM packages anyway?`,
+      false,
+    );
+    if (!proceed) {
+      log('Aborted. Commit or stash the project, then re-run `spm add`.');
+      process.exitCode = 1;
+      throw new Error('In-place injection declined (dirty working tree)');
+    }
+  } else if (clean === null) {
+    log(
+      `\x1b[33mNote: ${path.basename(xcodeprojPath)} is not in a git ` +
+        `repo — no backup is made before in-place injection.\x1b[0m`,
+    );
+  }
+
+  const result = injectSpmIntoExistingXcodeproj({
+    appRoot,
+    reactNativeRoot,
+    xcodeprojPath,
+    appName: args.productName,
+  });
+  if (result.status !== 'injected') {
+    logError(`SPM injection failed: ${result.reason}`);
+    process.exitCode = 1;
+    throw new Error(result.reason);
+  }
 }
 
 // Returns the `*.xcodeproj` carrying a `.spm-injected.json` marker (the
@@ -1403,7 +921,6 @@ function logNextSteps(
   projectRoot /*: string */,
   appRoot /*: string */,
   productName /*: string | null */,
-  rename /*: {from: string, to: string} | null */,
 ) {
   const appPkgJson = readPackageJson(projectRoot);
   const rawName =
@@ -1418,15 +935,8 @@ function logNextSteps(
   log(`  • Open ${appDisplayName}.xcodeproj in Xcode (or \`npm run ios\`)`);
   log('  • Set your Development Team in Signing & Capabilities');
   log('  • Build and run on Simulator or device');
-
-  if (rename != null) {
-    log('');
-    log('To roll back to CocoaPods later:');
-    log(`  mv ${rename.to} ${rename.from}`);
-    log(`  rm -rf ${appDisplayName}.xcodeproj build/`);
-    log('Or:');
-    log('  npx react-native spm clean --project');
-  }
+  log('');
+  log('To remove SPM later: `npx react-native spm deinit`');
 }
 
 async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
@@ -1436,18 +946,10 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
 
   // Standard-RN-layout redirect: if invoked from the JS root and there's an
   // `ios/` subdir, route the run there. Runs BEFORE resolveAction so the
-  // first-run heuristic (does `<App>-SPM.xcodeproj` exist?) checks the
-  // correct directory. `clean` keeps refusing because its destructive
-  // scopes (--project, --derived-data, --cache) shouldn't silently
-  // retarget a different directory.
+  // first-run heuristic checks the correct directory.
   const redirectTo = detectStandardRnLayoutRedirect(appRoot, projectRoot);
   if (redirectTo != null) {
-    const redirectAction = args.action ?? 'init';
-    if (redirectAction === 'clean') {
-      logError(formatRnRootMismatchMessage(projectRoot, redirectTo));
-      process.exitCode = 1;
-      return;
-    }
+    const redirectAction = args.action ?? 'add';
     log(
       `\x1b[33mDetected standard RN layout — running ${redirectAction} in ${displayPath(redirectTo)} ` +
         `instead of ${displayPath(appRoot)}.\x1b[0m`,
@@ -1457,69 +959,69 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
 
   const action = resolveAction(args.action, appRoot);
 
+  // Zero-arg safe-gate: when `add` was resolved implicitly (no action typed)
+  // on a freshly-scaffolded CocoaPods project, imply `--deintegrate` so the
+  // common "new app → SPM" path is one command. Never on an explicit `spm add`
+  // (that stays strict and fails loud on CocoaPods).
+  if (
+    action === 'add' &&
+    args.action == null &&
+    !args.deintegrate &&
+    shouldAutoDeintegrate(
+      appRoot,
+      resolveInjectionTarget(args, appRoot).path ?? null,
+    )
+  ) {
+    log(
+      'Detected a freshly-scaffolded CocoaPods project — converting to SwiftPM ' +
+        '(running `pod deintegrate`). Revert with `git` or `spm deinit`.',
+    );
+    args.deintegrate = true;
+  }
+
   log(`Running SPM ${action} in: ${displayPath(appRoot)}`);
   if (projectRoot !== appRoot) {
     log(`Project root (package.json): ${displayPath(projectRoot)}`);
   }
 
-  if (action === 'clean') {
-    const wantProject = args.cleanProject || args.cleanAll;
-    const wantDerivedData = args.cleanDerivedData || args.cleanAll;
-    const wantCache = args.cleanCache || args.cleanAll;
-    const cleanOpts /*: CleanOpts */ = {
-      project: wantProject,
-      derivedData: wantDerivedData,
-      cache: wantCache,
-    };
-
-    // Resolve cache slot path only when --cache (or --all) is requested.
-    // Falls back silently if we can't determine a version — clean just
-    // skips the cache target instead of crashing.
-    if (wantCache) {
-      try {
-        const reactNativeRoot = path.resolve(__dirname, '..');
-        const rawVersion =
-          args.version ?? determineVersion(args, reactNativeRoot);
-        const slotVersion = await resolveCacheSlotVersion(rawVersion);
-        cleanOpts.cacheSlotDir = defaultCacheDir(slotVersion, args.flavor);
-      } catch (e) {
-        logError(
-          `Could not resolve cache slot for --cache: ${e.message}. Skipping cache cleanup.`,
-        );
-      }
+  if (action === 'deinit') {
+    const xcodeprojPath =
+      args.xcodeprojPath != null
+        ? path.resolve(appRoot, args.xcodeprojPath)
+        : findInjectedXcodeproj(appRoot);
+    if (xcodeprojPath == null) {
+      log('No SPM injection found — nothing to remove.');
+      return;
     }
-
-    // Destructive scopes ask for confirmation unless --yes is passed:
-    //   --derived-data / --cache   touch state outside appRoot
-    //   --project                  removes the committed <App>-SPM.xcodeproj/
-    // The xcodeproj carries the user's signing, capabilities, build phases
-    // and is committed to the repo — deleting it loses Xcode-side edits.
-    const isDestructive = wantDerivedData || wantCache || wantProject;
-    if (isDestructive && !args.cleanYes) {
-      const targets = gatherCleanTargets(appRoot, cleanOpts).filter(t => {
-        // Existence check varies by target shape: rename targets reference
-        // a `from` (the .legacy backup); delete targets reference a `path`.
-        if (t.kind === 'rename') {
-          return fs.existsSync(t.from);
-        }
-        return fs.existsSync(t.path);
-      });
-      if (targets.length > 0) {
-        const proceed = await confirmDestructive(targets);
-        if (!proceed) {
-          log('Aborted.');
-          return;
-        }
-      }
-    }
-
-    cleanGeneratedState(appRoot, cleanOpts);
-    log('SPM cleanup complete.');
+    const result = removeSpmInjection({appRoot, xcodeprojPath});
+    log(
+      result.status === 'removed'
+        ? `Removed SPM packages from ${path.basename(xcodeprojPath)}.`
+        : 'No SPM injection found — nothing to remove.',
+    );
     return;
   }
 
+  // Fail fast on a CocoaPods-integrated target BEFORE the (expensive) pipeline,
+  // so the user isn't made to wait through codegen + artifact download only to
+  // be told to re-run with --deintegrate. Skipped when --deintegrate is set
+  // (explicitly or via the safe-gate) — deintegration happens in setupXcodeproj.
+  if ((action === 'add' || action === 'update') && !args.deintegrate) {
+    const target = resolveInjectionTarget(args, appRoot);
+    if (target.path != null && pbxprojUsesCocoaPods(target.path)) {
+      logError(
+        `${path.basename(target.path)} is CocoaPods-integrated. Re-run ` +
+          '`spm add --deintegrate` to convert it (runs `pod deintegrate` + ' +
+          'strips React Native from the Podfile), or run `pod deintegrate` ' +
+          'yourself first. Side-by-side non-RN pods are fine.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   const needsCliConfig =
-    action === 'init' ||
+    action === 'add' ||
     action === 'update' ||
     action === 'sync' ||
     action === 'scaffold';
@@ -1688,22 +1190,15 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // so no path-locator JSON is written.
   buildPerAppHeaderTree(appRoot, {log});
 
-  if (action === 'init') {
+  // First-time setup only adds the gitignore entries on `add`.
+  if (action === 'add') {
     ensureGitignoreSpmEntries(appRoot);
   }
 
-  // Xcodeproj setup. Default = in-place injection into the existing project
-  // (no rename, git is the safety net); falls back to / forced into the
-  // from-scratch + rename-legacy path. A non-null rename means from-scratch
-  // ran and a legacy CocoaPods project was set aside.
-  let migrationRename /*: {from: string, to: string} | null */ = null;
+  // Xcodeproj setup: in-place injection into the existing project (the only
+  // strategy — no rename, no from-scratch; git is the safety net).
   try {
-    migrationRename = await setupXcodeproj(
-      args,
-      appRoot,
-      reactNativeRoot,
-      action,
-    );
+    await setupXcodeproj(args, appRoot, reactNativeRoot);
   } catch (e) {
     logError(`xcodeproj setup failed: ${e.message}`);
     if (process.exitCode == null) {
@@ -1712,18 +1207,7 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     return;
   }
 
-  // Podfile-patch only matters in the from-scratch coexistence case (a legacy
-  // CocoaPods project was renamed and sits alongside the SPM one). In-place
-  // injection has a single project, so there's nothing to disambiguate.
-  if (action === 'init' && migrationRename != null) {
-    try {
-      await maybePatchPodfile(args, appRoot);
-    } catch (e) {
-      logError(`Podfile check failed: ${e.message}. Continuing.`);
-    }
-  }
-
-  logNextSteps(projectRoot, appRoot, args.productName, migrationRename);
+  logNextSteps(projectRoot, appRoot, args.productName);
 }
 
 if (require.main === module) {
@@ -1732,13 +1216,8 @@ if (require.main === module) {
 
 module.exports = {
   main,
-  cleanGeneratedState,
-  gatherCleanTargets,
-  decideLegacyMigration,
   detectStandardRnLayoutRedirect,
-  findExistingSpmXcodeproj,
   findInjectedXcodeproj,
-  findLegacyXcodeproj,
-  podfileNeedsPatch,
   resolveAction,
+  shouldAutoDeintegrate,
 };

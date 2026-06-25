@@ -122,7 +122,7 @@ const SCAFFOLD_PREFIX_HEADER_CONTENTS = `// AUTO-SCAFFOLDED by react-native spm 
 // Names of deps the scaffolder always refuses to touch — `react-native`
 // itself is handled by the xcframework subpackage, never as an autolinked
 // target.
-const NEVER_SCAFFOLD /*: $ReadOnlySet<string> */ = new Set(['react-native']);
+const NEVER_SCAFFOLD /*: ReadonlySet<string> */ = new Set(['react-native']);
 
 // React-core / React-Fabric / etc. dependency names collapse to a single
 // `.product(name: "ReactNative", package: "ReactNative")` reference because
@@ -980,7 +980,7 @@ type ScaffoldAllOptions = {
   // npm dep names to skip entirely — used when the user declined the
   // confirmation prompt for first-time scaffolds. Skipped deps still
   // appear in the returned results array with status='skipped-opt-out'.
-  skipDeps?: $ReadOnlyArray<string>,
+  skipDeps?: ReadonlyArray<string>,
 };
 */
 

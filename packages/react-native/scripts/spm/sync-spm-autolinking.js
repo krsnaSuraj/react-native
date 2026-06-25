@@ -67,7 +67,7 @@ const {log} = makeLogger('sync-spm-autolinking');
  *     cache slot isn't populated yet.
  */
 function decideSyncPlan(
-  remote /*: mixed */,
+  remote /*: unknown */,
   hasCachedArtifacts /*: boolean */,
 ) /*: {isRemote: boolean, shouldDownload: boolean, shouldGeneratePackage: boolean} */ {
   const isRemote = remote != null;
@@ -98,7 +98,7 @@ const defaultDeps = {
 
 async function main(
   argv /*:: ?: Array<string> */,
-  overrides /*:: ?: $Shape<typeof defaultDeps> */,
+  overrides /*:: ?: Partial<typeof defaultDeps> */,
 ) /*: Promise<void> */ {
   const deps = {...defaultDeps, ...(overrides ?? {})};
   const parsed = yargs(argv ?? process.argv.slice(2))
@@ -172,7 +172,7 @@ async function main(
     log(
       `Using cached xcframework artifacts (slot: ${slotVersion}, ${displayPath(expectedCacheDir)})`,
     );
-  } else {
+  } else if (remote != null) {
     log(`Remote ReactNative package: ${remote.url} @ ${remote.version}`);
   }
   // Always feed the expected slot into generate-spm-package — it rewrites the

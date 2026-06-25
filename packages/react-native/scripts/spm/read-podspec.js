@@ -32,7 +32,7 @@ const fs = require('fs');
 const path = require('path');
 
 /*::
-type RawSpec = {[string]: mixed};
+type RawSpec = {[string]: unknown};
 */
 
 // ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
   const partial /*: boolean */ = rawSpec.__regex_partial__ === true;
   if (Array.isArray(rawSpec.__warnings__)) {
     // $FlowFixMe[incompatible-type] runtime-validated dynamic shape
-    const rawWarnings /*: $ReadOnlyArray<string> */ = rawSpec.__warnings__;
+    const rawWarnings /*: ReadonlyArray<string> */ = rawSpec.__warnings__;
     for (const w of rawWarnings) {
       warnings.push(w);
     }
@@ -598,7 +598,7 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
   }
 
   // $FlowFixMe[prop-missing] dynamic shape
-  const reqArc /*: mixed */ = rawSpec.requires_arc;
+  const reqArc /*: unknown */ = rawSpec.requires_arc;
   const requiresArc =
     reqArc === false || (Array.isArray(reqArc) && reqArc.length === 0)
       ? false

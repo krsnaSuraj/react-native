@@ -763,7 +763,7 @@ function injectSpmIntoPbxproj(
   // 1. Insert the new objects (skip any UUID already present — idempotency).
   const insertObjects = (
     sectionName /*: string */,
-    objs /*: $ReadOnlyArray<{+uuid: string, +comment?: ?string, +fields: {+[string]: string}, ...}> */,
+    objs /*: ReadonlyArray<{readonly uuid: string, readonly comment?: ?string, readonly fields: {readonly [string]: string}, ...}> */,
   ) => {
     const fresh = objs.filter(o => !text.includes(o.uuid));
     for (const o of objs) {

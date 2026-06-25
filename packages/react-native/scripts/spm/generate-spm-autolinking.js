@@ -215,7 +215,7 @@ function inferPublicHeadersPath(sourcePath /*: string */) /*: string | null */ {
 }
 
 /*::
-type ExtensionFilter = $ReadOnlySet<string>;
+type ExtensionFilter = ReadonlySet<string>;
 */
 
 const HEADER_EXTENSIONS /*: ExtensionFilter */ = new Set(['.h', '.hpp']);
@@ -234,7 +234,7 @@ const ALL_SOURCE_EXTENSIONS /*: ExtensionFilter */ = new Set([
 // Directory names whose contents should never be included in an SPM target —
 // test fixtures, Android sources, vendored modules. Shared between the source
 // walker and the header linker so they agree on what to skip.
-const SKIP_DIRS_DEFAULT /*: $ReadOnlySet<string> */ = new Set([
+const SKIP_DIRS_DEFAULT /*: ReadonlySet<string> */ = new Set([
   'android',
   'tests',
   '__tests__',
@@ -767,8 +767,8 @@ function autolinkingDepToSpmTarget(
 function generateAutolinkedPackageSwift(
   input /*: AggregatorInput */,
 ) /*: string */ {
-  const npmDeps /*: $ReadOnlyArray<NpmDepRef> */ = input.npmDeps ?? [];
-  const inlineTargets /*: $ReadOnlyArray<SpmTarget> */ =
+  const npmDeps /*: ReadonlyArray<NpmDepRef> */ = input.npmDeps ?? [];
+  const inlineTargets /*: ReadonlyArray<SpmTarget> */ =
     input.inlineTargets ?? [];
   const hasReactDep /*: boolean */ = input.hasReactDep !== false;
   // Relative path from autolinked/ to build/xcframeworks/, e.g. "../build/xcframeworks".

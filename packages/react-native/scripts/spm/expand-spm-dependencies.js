@@ -11,6 +11,8 @@
 'use strict';
 
 const {toSwiftName} = require('./spm-utils');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * expand-spm-dependencies.js — Resolves transitive native deps declared via
@@ -33,9 +35,6 @@ const {toSwiftName} = require('./spm-utils');
  * I/O is injected (readConfig, resolveDep) so the logic stays pure and
  * testable.
  */
-
-const fs = require('fs');
-const path = require('path');
 
 /*::
 import type {AutolinkedDep} from './spm-types';

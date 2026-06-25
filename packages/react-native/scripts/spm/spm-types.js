@@ -182,8 +182,8 @@ export type NpmDepRef = {
 };
 
 export type AggregatorInput = {
-  npmDeps?: $ReadOnlyArray<NpmDepRef>,
-  inlineTargets?: $ReadOnlyArray<SpmTarget>,
+  npmDeps?: ReadonlyArray<NpmDepRef>,
+  inlineTargets?: ReadonlyArray<SpmTarget>,
   hasReactDep?: boolean,
   // Relative path from the aggregator's dir (autolinking/) to
   // build/xcframeworks. Used for the inline-target ReactNative dep.

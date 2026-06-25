@@ -12,8 +12,8 @@
 
 import type {Greeting} from 'react-native-test-library-common';
 
-import {formatGreeting} from 'react-native-test-library-common';
 import {NativeModules, Platform} from 'react-native';
+import {formatGreeting} from 'react-native-test-library-common';
 
 export function greet(g: Greeting): Promise<string> {
   const TestLibraryApple = NativeModules.TestLibraryApple;

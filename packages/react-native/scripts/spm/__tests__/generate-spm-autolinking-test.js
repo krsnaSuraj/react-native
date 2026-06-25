@@ -256,7 +256,7 @@ describe('generateSynthPackageSwift', () => {
     );
     // No header-search-path vars, no flags, no legacy VFS machinery.
     expect(result).not.toContain('rnCoreHeaders');
-    expect(result).not.toContain('unsafeFlags([\"-I\"');
+    expect(result).not.toContain('unsafeFlags(["-I"');
     expect(result).not.toContain('ReactHeadersAll');
     expect(result).not.toContain('-ivfsoverlay');
     expect(result).not.toContain('let xcfwHeaders');

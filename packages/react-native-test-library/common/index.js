@@ -12,7 +12,7 @@
 
 import {NativeModules, Platform} from 'react-native';
 
-export type Greeting = $ReadOnly<{
+export type Greeting = Readonly<{
   name: string,
   language: string,
 }>;

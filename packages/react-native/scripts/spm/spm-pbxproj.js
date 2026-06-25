@@ -43,7 +43,7 @@ function quoteIfNeeded(s /*: string */) /*: string */ {
  * entries into an existing project.
  */
 function serializeEntry(
-  entry /*: {+uuid: string, +comment?: ?string, +fields: {+[string]: string}, ...} */,
+  entry /*: {readonly uuid: string, readonly comment?: ?string, readonly fields: {readonly [string]: string}, ...} */,
 ) /*: string */ {
   const comment =
     entry.comment != null && entry.comment !== ''
@@ -334,12 +334,14 @@ function addArrayMembers(
   text /*: string */,
   obj /*: BodyRange */,
   key /*: string */,
-  members /*: $ReadOnlyArray<{+uuid: string, +comment?: ?string, ...}> */,
+  members /*: ReadonlyArray<{readonly uuid: string, readonly comment?: ?string, ...}> */,
   options /*: {prepend?: boolean} */ = {},
 ) /*: string */ {
   const fieldIndent = detectFieldIndent(text, obj);
   const memberIndent = fieldIndent + '\t';
-  const line = (m /*: {+uuid: string, +comment?: ?string, ...} */) =>
+  const line = (
+    m /*: {readonly uuid: string, readonly comment?: ?string, ...} */,
+  ) =>
     `${memberIndent}${m.uuid}${m.comment != null && m.comment !== '' ? ` /* ${m.comment} */` : ''},\n`;
 
   const field = findField(text, obj, key);
@@ -460,7 +462,7 @@ function removeObjectByUuid(
  */
 function removeArrayMembersByUuid(
   text /*: string */,
-  uuids /*: $ReadOnlyArray<string> */,
+  uuids /*: ReadonlyArray<string> */,
 ) /*: string */ {
   let out = text;
   for (const uuid of uuids) {
@@ -495,7 +497,7 @@ function removeArrayStringValues(
   text /*: string */,
   obj /*: BodyRange */,
   key /*: string */,
-  values /*: $ReadOnlyArray<string> */,
+  values /*: ReadonlyArray<string> */,
 ) /*: string */ {
   const f = findField(text, obj, key);
   if (f == null) {

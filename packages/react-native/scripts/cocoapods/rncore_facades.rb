@@ -114,6 +114,7 @@ module RNCoreFacades
         FileUtils.mkdir_p(abs_base)
         FACADE_PODS.each do |name, podspec_rel_path|
             podspec_path = File.join(react_native_path.to_s, podspec_rel_path)
+            podspec_dir = File.dirname(podspec_path)
             real = load_real_spec(podspec_path, name)
             dir = File.join(abs_base, name)
             FileUtils.mkdir_p(dir)

@@ -58,7 +58,7 @@ const {
   makeLogger,
   sharedCacheDir,
 } = require('./spm-utils');
-const {execSync} = require('child_process');
+const {execFileSync} = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const stream = require('stream');
@@ -595,7 +595,7 @@ function extractXCFramework(
 ) /*: string */ {
   fs.mkdirSync(extractDir, {recursive: true});
   log(`  Extracting ${path.basename(tarPath)}...`);
-  execSync(`tar -xzf "${tarPath}" -C "${extractDir}"`, {stdio: 'pipe'});
+  execFileSync('tar', ['-xzf', tarPath, '-C', extractDir], {stdio: 'pipe'});
 
   const found = findFirst(extractDir, name => name.endsWith('.xcframework'), 8);
   if (found == null) {
@@ -660,7 +660,7 @@ function stageHermesHeaders(
   const dest = path.join(destRoot, 'hermes');
   fs.rmSync(dest, {recursive: true, force: true});
   fs.mkdirSync(destRoot, {recursive: true});
-  execSync(`/bin/cp -R "${src}" "${dest}"`, {stdio: 'pipe'});
+  execFileSync('/bin/cp', ['-R', src, dest], {stdio: 'pipe'});
   log('  Staged Hermes public headers → hermes-headers/hermes');
 }
 
@@ -738,7 +738,7 @@ async function ensureCompanionStaged(
   fs.rmSync(tmp, {recursive: true, force: true});
   fs.mkdirSync(tmp, {recursive: true});
   try {
-    execSync(`tar -xzf "${tarPath}" -C "${tmp}"`, {stdio: 'pipe'});
+    execFileSync('tar', ['-xzf', tarPath, '-C', tmp], {stdio: 'pipe'});
     stageCompanionXcframework(tmp, outputDir, name);
   } finally {
     fs.rmSync(tmp, {recursive: true, force: true});
@@ -784,7 +784,7 @@ async function ensureHermesHeadersStaged(
   fs.rmSync(tmp, {recursive: true, force: true});
   fs.mkdirSync(tmp, {recursive: true});
   try {
-    execSync(`tar -xzf "${tarPath}" -C "${tmp}"`, {stdio: 'pipe'});
+    execFileSync('tar', ['-xzf', tarPath, '-C', tmp], {stdio: 'pipe'});
     stageHermesHeaders(tmp, outputDir);
   } finally {
     fs.rmSync(tmp, {recursive: true, force: true});

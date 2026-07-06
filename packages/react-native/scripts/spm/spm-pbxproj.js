@@ -14,11 +14,13 @@ const crypto = require('crypto');
 
 /**
  * Generate a deterministic 24-hex-character UUID from a seed string.
- * Uses MD5 hash truncated to 24 chars (standard Xcode pbxproj UUID length).
+ * SHA-256 truncated to 24 chars (standard Xcode pbxproj UUID length). Not a
+ * security use — the hash only provides stable, collision-unlikely IDs — but
+ * sha256 keeps static analysis (CodeQL weak-crypto) quiet.
  */
 function generateUUID(seed /*: string */) /*: string */ {
   return crypto
-    .createHash('md5')
+    .createHash('sha256')
     .update(seed)
     .digest('hex')
     .substring(0, 24)

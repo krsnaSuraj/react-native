@@ -1,20 +1,22 @@
 # Prebuilt ReactNativeDependencies — self-serving headers + deps facades
 
-How the third-party C/C++ deps (`RCT-Folly`, `glog`, `boost`, `DoubleConversion`,
-`fmt`, `fast_float`, `SocketRocket`) are served when
+How the third-party C/C++ deps (`RCT-Folly`, `glog`, `boost`,
+`DoubleConversion`, `fmt`, `fast_float`, `SocketRocket`) are served when
 `ReactNativeDependenciesUtils.build_react_native_deps_from_source()` is false
 (prebuilt-deps mode). Source-deps mode is unaffected by everything below.
 
 ## Pod-served headers, CocoaPods only (`rndependencies.rb`)
 
-In prebuilt-deps mode the `ReactNativeDependencies` POD (CocoaPods) is the single authority
-for the third-party deps: compiled code lives in its xcframework binary, and the
-artifact's own `Headers/{folly,glog,boost,fmt,double-conversion,fast_float,
-SocketRocket}` are flattened into the pod's `Headers/` by the podspec's
-`prepare_command`. Consumers resolve bare `<folly/...>` / `<SocketRocket/...>`
-via CocoaPods public-header linkage from `s.dependency "ReactNativeDependencies"`,
-plus an explicit `HEADER_SEARCH_PATHS` entry
-(`$(PODS_ROOT)/ReactNativeDependencies/Headers`). The real source pods are neither depended on nor searched.
+In prebuilt-deps mode the `ReactNativeDependencies` POD (CocoaPods) is the
+single authority for the third-party deps: compiled code lives in its
+xcframework binary, and the artifact's own
+`Headers/{folly,glog,boost,fmt,double-conversion,fast_float, SocketRocket}` are
+flattened into the pod's `Headers/` by the podspec's `prepare_command`.
+Consumers resolve bare `<folly/...>` / `<SocketRocket/...>` via CocoaPods
+public-header linkage from `s.dependency "ReactNativeDependencies"`, plus an
+explicit `HEADER_SEARCH_PATHS` entry
+(`$(PODS_ROOT)/ReactNativeDependencies/Headers`). The real source pods are
+neither depended on nor searched.
 
 NOTE: this is a CocoaPods-level contract. The deps XCFRAMEWORK itself is NOT
 self-serving: it is framework-type without `HeadersPath`, so its root `Headers/`
@@ -42,9 +44,10 @@ compile from source next to the prebuilt binary. `RNDepsFacades` generates
 dependency-only facade podspecs (`build/rndeps-facades/<Name>/`), installed as
 LOCAL pods (`:path`, so Podfile-local resolution beats trunk, nothing fetched):
 no sources, no headers, single dependency on `ReactNativeDependencies`.
-Versions + subspecs are DERIVED from the real podspecs in `third-party-podspecs/`
-(RCT-Folly keeps `/Default` + `/Fabric`, `default_subspecs = ["Default"]`).
-SocketRocket has no local podspec — its facade version is SYNTHESIZED from
+Versions + subspecs are DERIVED from the real podspecs in
+`third-party-podspecs/` (RCT-Folly keeps `/Default` + `/Fabric`,
+`default_subspecs = ["Default"]`). SocketRocket has no local podspec — its
+facade version is SYNTHESIZED from
 `Helpers::Constants::socket_rocket_config[:version]`, fail-closed if absent.
 `:modular_headers` is intentionally dropped on facade declarations: a
 dependency-only placeholder builds no module; consumers get modules from
@@ -52,12 +55,12 @@ dependency-only placeholder builds no module; consumers get modules from
 
 ## Mode × supplier table
 
-| core × deps | real 3P pods in graph | SocketRocket headers supplier |
-|---|---|---|
-| source + source | yes (`react_native_pods.rb` deps-source branch) | real pod |
-| source + prebuilt | no | RNDeps artifact (sole supplier) |
-| prebuilt + source | yes | real pod |
-| prebuilt + prebuilt | no | RNDeps artifact |
+| core × deps         | real 3P pods in graph                           | SocketRocket headers supplier   |
+| ------------------- | ----------------------------------------------- | ------------------------------- |
+| source + source     | yes (`react_native_pods.rb` deps-source branch) | real pod                        |
+| source + prebuilt   | no                                              | RNDeps artifact (sole supplier) |
+| prebuilt + source   | yes                                             | real pod                        |
+| prebuilt + prebuilt | no                                              | RNDeps artifact                 |
 
 ## SocketRocket privacy manifest
 
@@ -67,6 +70,5 @@ work: the deps prebuild (`scripts/releases/ios-prebuild/configuration.js`) now
 embeds `ReactNativeDependencies_SocketRocket.bundle/PrivacyInfo.xcprivacy`,
 sourced from an RN-authored manifest at
 `scripts/releases/ios-prebuild/resources/SocketRocket/PrivacyInfo.xcprivacy`
-(accurate-empty:
-SocketRocket uses no Required Reason APIs). Facades remain resource-free by
-design.
+(accurate-empty: SocketRocket uses no Required Reason APIs). Facades remain
+resource-free by design.

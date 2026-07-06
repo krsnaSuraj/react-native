@@ -151,7 +151,9 @@ const dependencies /*: ReadonlyArray<Dependency> */ = [
     files: {
       sources: ['SocketRocket/**/*.{h,m}', 'include/*.h'],
       headers: ['SocketRocket/*.h'],
-      resources: ['../../../scripts/releases/ios-prebuild/resources/SocketRocket/PrivacyInfo.xcprivacy'],
+      resources: [
+        '../../../scripts/releases/ios-prebuild/resources/SocketRocket/PrivacyInfo.xcprivacy',
+      ],
     },
     settings: {
       publicHeaderFiles: './include',

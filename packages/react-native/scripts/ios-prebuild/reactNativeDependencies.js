@@ -161,6 +161,10 @@ function checkExistingVersion(
       dependencyLog(
         `React Native Dependencies found on disk at: ${artifactsPath}.\nNo version file has been found. We are going to use it anyway, but there might be some unexpected behaviors.`,
       );
+      // Honor the message above: an artifact without a version marker is a
+      // locally-staged one (e.g. a freshly composed deps build) — falling
+      // through here rmSync'd it and re-downloaded. Use it as-is.
+      return true;
     }
   } else {
     dependencyLog('React Native Dependencies not found on disk');

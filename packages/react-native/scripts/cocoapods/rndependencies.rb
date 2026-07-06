@@ -49,8 +49,19 @@ def add_rn_third_party_dependencies(s)
 
         current_pod_target_xcconfig["HEADER_SEARCH_PATHS"] = header_search_paths
     else
+        # Prebuilt-deps mode: this pod SELF-SERVES the third-party headers from its
+        # own xcframework (incl. SocketRocket - sole supplier in this mode). See
+        # scripts/cocoapods/__docs__/prebuilt-deps.md for the full contract.
         s.dependency "ReactNativeDependencies"
-        current_pod_target_xcconfig["HEADER_SEARCH_PATHS"] ||= [] << "$(PODS_ROOT)/ReactNativeDependencies"
+
+        header_search_paths = current_pod_target_xcconfig["HEADER_SEARCH_PATHS"] || []
+        if header_search_paths.is_a?(String)
+            header_search_paths = header_search_paths.split(" ")
+        end
+        # Artifact headers are flattened into the pod-local Headers/ by the podspec
+        # prepare_command (see __docs__/prebuilt-deps.md).
+        header_search_paths << "$(PODS_ROOT)/ReactNativeDependencies/Headers"
+        current_pod_target_xcconfig["HEADER_SEARCH_PATHS"] = header_search_paths
     end
 
     s.pod_target_xcconfig = current_pod_target_xcconfig

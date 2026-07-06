@@ -14,11 +14,14 @@ import PackageDescription
 
 // React headers need NO search paths: React/react namespaces come from the
 // React binaryTarget (auto -F; headers + module map inside the framework),
-// every other namespace from the ReactNativeHeaders binaryTarget, and the
-// per-app generated headers from the ReactAppHeaders target below — all
-// auto-served by SPM through product/target dependencies.
+// every other RN namespace from the ReactNativeHeaders binaryTarget
+// (pure-RN), the third-party deps namespaces (folly/glog/boost/...) from the
+// ReactNativeDependenciesHeaders sidecar, and the per-app generated headers
+// from the ReactAppHeaders target below — all auto-served by SPM through
+// product/target dependencies.
 let headersDep: [Target.Dependency] = [
     .product(name: "ReactNativeHeaders", package: "ReactNative"),
+    .product(name: "ReactNativeDependenciesHeaders", package: "ReactNative"),
     "ReactAppHeaders",
 ]
 

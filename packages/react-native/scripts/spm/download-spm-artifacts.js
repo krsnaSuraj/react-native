@@ -96,6 +96,11 @@ function parseArgs(argv /*: Array<string> */) /*: DownloadArgs */ {
       describe:
         'Local ReactNativeHeaders tarball to use instead of downloading. Env fallback: RN_HEADERS_TARBALL_PATH.',
     })
+    .option('deps-headers-tarball', {
+      type: 'string',
+      describe:
+        'Local ReactNativeDependenciesHeaders tarball. Normally unneeded — the sidecar ships inside the ReactNativeDependencies tarball. Env fallback: RN_DEPS_HEADERS_TARBALL_PATH.',
+    })
     .usage(
       'Usage: $0 [options]\n\nDownloads React Native iOS xcframeworks from Maven.',
     )
@@ -110,6 +115,10 @@ function parseArgs(argv /*: Array<string> */) /*: DownloadArgs */ {
       parsed['core-tarball'] ?? process.env.RN_CORE_TARBALL_PATH ?? null,
     headersTarball:
       parsed['headers-tarball'] ?? process.env.RN_HEADERS_TARBALL_PATH ?? null,
+    depsHeadersTarball:
+      parsed['deps-headers-tarball'] ??
+      process.env.RN_DEPS_HEADERS_TARBALL_PATH ??
+      null,
   };
 }
 
@@ -655,6 +664,87 @@ function stageHermesHeaders(
   log('  Staged Hermes public headers → hermes-headers/hermes');
 }
 
+const DEPS_HEADERS_NAME = 'ReactNativeDependenciesHeaders';
+
+// Headers-only companion xcframeworks that ship INSIDE another artifact's
+// tarball: the ReactCore tarball carries ReactNativeHeaders.xcframework
+// beside React.xcframework, and the ReactNativeDependencies tarball carries
+// the ReactNativeDependenciesHeaders sidecar beside the binary (the binary is
+// framework-type, so only the LIBRARY-type sidecar can serve the deps
+// namespaces — folly/glog/boost/... — to SwiftPM; ReactNativeHeaders is
+// pure-RN). extractXCFramework keeps only the first xcframework, so
+// companions are staged separately into their own
+// `<outputDir>/<name>.xcframework`.
+const COMPANION_XCFRAMEWORKS /*: {[label: string]: string} */ = {
+  'react-core': 'ReactNativeHeaders',
+  rndeps: DEPS_HEADERS_NAME,
+};
+
+/**
+ * Stages a companion xcframework out of an extract dir. Returns true when
+ * staged; false when the tarball predates the companion.
+ */
+function stageCompanionXcframework(
+  extractDir /*: string */,
+  outputDir /*: string */,
+  name /*: string */,
+) /*: boolean */ {
+  const src = findFirst(extractDir, n => n === `${name}.xcframework`, 8);
+  if (src == null) {
+    return false;
+  }
+  const dest = path.join(outputDir, `${name}.xcframework`);
+  fs.rmSync(dest, {recursive: true, force: true});
+  fs.renameSync(src, dest);
+  log(`  Staged companion ${name}.xcframework`);
+  return true;
+}
+
+/**
+ * Self-heal: stage a companion xcframework into an already-extracted slot
+ * (the fast path skips extraction, so the companion was never staged).
+ * Prefers a CACHED tarball (no network); downloads only as a last resort.
+ */
+async function ensureCompanionStaged(
+  url /*: string */,
+  downloadDir /*: string */,
+  sharedTarballName /*: ?string */,
+  outputDir /*: string */,
+  name /*: string */,
+) /*: Promise<void> */ {
+  const candidates = [
+    !/^https?:\/\//.test(url) ? url : null, // local-tarball override
+    path.join(downloadDir, url.split('/').pop() ?? ''),
+    sharedTarballName != null
+      ? path.join(sharedCacheDir(), sharedTarballName)
+      : null,
+  ].filter(Boolean);
+  let tarPath /*: ?string */ = candidates.find(
+    p => p != null && fs.existsSync(p),
+  );
+  if (tarPath == null) {
+    if (!/^https?:\/\//.test(url)) {
+      return; // local override missing — nothing to recover from
+    }
+    const localPath = path.join(
+      downloadDir,
+      url.split('/').pop() ?? 'artifact.tar.gz',
+    );
+    fs.mkdirSync(downloadDir, {recursive: true});
+    await download(url, localPath);
+    tarPath = localPath;
+  }
+  const tmp = path.join(outputDir, `.companion-tmp-${name}`);
+  fs.rmSync(tmp, {recursive: true, force: true});
+  fs.mkdirSync(tmp, {recursive: true});
+  try {
+    execSync(`tar -xzf "${tarPath}" -C "${tmp}"`, {stdio: 'pipe'});
+    stageCompanionXcframework(tmp, outputDir, name);
+  } finally {
+    fs.rmSync(tmp, {recursive: true, force: true});
+  }
+}
+
 /**
  * Self-heal: stage Hermes headers into an already-extracted slot (the fast
  * path skips extraction, so the headers were never staged). Prefers a CACHED
@@ -758,6 +848,27 @@ async function processArtifact(
         log(`  Hermes header backfill failed (${e.message}) — continuing`);
       }
     }
+    // Same for the headers-only companions (ReactNativeHeaders from the core
+    // tarball, the ReactNativeDependenciesHeaders sidecar from the deps
+    // tarball): backfill into slots extracted by older tooling from the
+    // cached tarball.
+    const companion = COMPANION_XCFRAMEWORKS[label];
+    if (
+      companion != null &&
+      !fs.existsSync(path.join(outputDir, `${companion}.xcframework`))
+    ) {
+      try {
+        await ensureCompanionStaged(
+          url,
+          downloadDir,
+          sharedTarballName,
+          outputDir,
+          companion,
+        );
+      } catch (e) {
+        log(`  ${companion} backfill failed (${e.message}) — continuing`);
+      }
+    }
     return {label, version, xcframeworkPath: destXcfwPath, url};
   }
 
@@ -855,6 +966,18 @@ async function processArtifact(
       stageHermesHeaders(tmpExtractDir, outputDir);
     } catch (e) {
       log(`  Hermes header staging failed (${e.message}) — continuing`);
+    }
+  }
+
+  // Headers-only companions ship inside the same tarball (ReactNativeHeaders
+  // in the core tarball, the ReactNativeDependenciesHeaders sidecar in the
+  // deps tarball) — stage them as their own artifacts.
+  const companionName = COMPANION_XCFRAMEWORKS[label];
+  if (companionName != null) {
+    if (!stageCompanionXcframework(tmpExtractDir, outputDir, companionName)) {
+      log(
+        `  ${companionName}.xcframework not present in the ${label} tarball (pre-companion artifact)`,
+      );
     }
   }
 
@@ -956,10 +1079,11 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     },
   ];
 
-  // ReactNativeHeaders (headers-only artifact): currently local-tarball only
-  // (--headers-tarball / RN_HEADERS_TARBALL_PATH, e.g. the prebuild output at
-  // .build/output/xcframeworks/<flavor>/ReactNativeHeaders.xcframework.tar.gz).
-  // The Maven resolve joins this list when nightlies publish the artifact.
+  // ReactNativeHeaders is normally staged straight out of the ReactCore
+  // tarball (it ships beside React.xcframework). The override exists for
+  // testing a standalone headers tarball (e.g. the prebuild output at
+  // .build/output/xcframeworks/<flavor>/ReactNativeHeaders.xcframework.tar.gz,
+  // published on Maven under classifier reactnative-headers-<flavor>).
   const headersTarball = args.headersTarball;
   if (headersTarball != null && headersTarball !== '') {
     if (!fs.existsSync(headersTarball)) {
@@ -973,6 +1097,29 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       resolve: () =>
         Promise.resolve({
           url: headersTarball,
+          version: `${resolvedRnVersion}-local`,
+        }),
+      sharedName: null,
+    });
+  }
+
+  // ReactNativeDependenciesHeaders: normally staged straight out of the deps
+  // tarball (the sidecar ships inside it). The override exists for testing a
+  // standalone sidecar tarball (classifier
+  // reactnative-dependencies-headers-<flavor>).
+  const depsHeadersTarball = args.depsHeadersTarball;
+  if (depsHeadersTarball != null && depsHeadersTarball !== '') {
+    if (!fs.existsSync(depsHeadersTarball)) {
+      die(
+        `deps-headers tarball override is set to ${depsHeadersTarball} but the file does not exist`,
+      );
+    }
+    artifactSpecs.push({
+      label: 'rndeps-headers',
+      name: DEPS_HEADERS_NAME,
+      resolve: () =>
+        Promise.resolve({
+          url: depsHeadersTarball,
           version: `${resolvedRnVersion}-local`,
         }),
       sharedName: null,
@@ -1054,9 +1201,10 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       }
     }
   }
-  // Abort on ANY failure — the three artifacts (React, ReactNativeDependencies,
-  // hermes-engine) are all required; proceeding with a partial set would only
-  // surface as a confusing build error in Xcode. We also intentionally do NOT
+  // Abort on ANY failure — every artifact (React, ReactNativeDependencies,
+  // hermes-engine + the headers companions) is required; proceeding with a
+  // partial set would only surface as a confusing build error in Xcode. We
+  // also intentionally do NOT
   // write artifacts.json when there are failures: the orchestrator uses its
   // presence as the "already present" signal, so a partial write would mask
   // the problem and prevent retries.
@@ -1079,6 +1227,45 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       artifactsJson[r.name] = {xcframeworkPath: r.xcframeworkPath, url: r.url};
     }
   }
+  // The headers-only companions are staged by their parent's extraction (or
+  // by the --headers-tarball / --deps-headers-tarball overrides above, which
+  // already produced entries). A slot without them cannot resolve any
+  // non-React namespace (ReactNativeHeaders) or the <folly/...>-style deps
+  // includes (the sidecar; ReactNativeHeaders is pure-RN) — fail closed
+  // rather than hand Xcode a package graph that breaks with header-not-found
+  // errors much later.
+  const companions = [
+    {
+      name: 'ReactNativeHeaders',
+      parent: 'React',
+      advice:
+        'The React core tarball predates the headers-spec layout — use a ' +
+        'matching react-native version, or pass --headers-tarball / ' +
+        'RN_HEADERS_TARBALL_PATH.',
+    },
+    {
+      name: DEPS_HEADERS_NAME,
+      parent: 'ReactNativeDependencies',
+      advice:
+        'The ReactNativeDependencies tarball predates the headers sidecar — ' +
+        'use a matching react-native version, or pass ' +
+        '--deps-headers-tarball / RN_DEPS_HEADERS_TARBALL_PATH.',
+    },
+  ];
+  for (const {name, parent, advice} of companions) {
+    if (artifactsJson[name] != null) {
+      continue;
+    }
+    const companionPath = path.join(outputDir, `${name}.xcframework`);
+    if (!fs.existsSync(companionPath)) {
+      die(`${name}.xcframework is missing from the artifact slot. ${advice}`);
+    }
+    const parentEntry = artifactsJson[parent];
+    artifactsJson[name] = {
+      xcframeworkPath: companionPath,
+      url: parentEntry != null ? parentEntry.url : '',
+    };
+  }
   const artifactsJsonPath = path.join(outputDir, 'artifacts.json');
   fs.writeFileSync(
     artifactsJsonPath,
@@ -1088,13 +1275,18 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   log(`Artifact index: ${displayPath(artifactsJsonPath)}`);
 }
 
-// Canonical set of xcframework artifacts the SPM pipeline downloads. The
-// xcodeproj references all three as package products; missing any one
-// surfaces as "Missing package product" only at Xcode build time. Used by
+// Canonical set of xcframework artifacts an SPM slot must provide. The
+// xcodeproj references them as package products; missing any one surfaces as
+// "Missing package product" only at Xcode build time. Used by
 // `setup-apple-spm.js` to validate the cache before skipping a re-download.
+// ReactNativeHeaders (pure-RN) and ReactNativeDependenciesHeaders (the deps
+// sidecar) are the two headers-only targets — both required: without the
+// sidecar no <folly/...>-style include resolves.
 const REQUIRED_ARTIFACTS = [
   'React',
+  'ReactNativeHeaders',
   'ReactNativeDependencies',
+  'ReactNativeDependenciesHeaders',
   'hermes-engine',
 ];
 

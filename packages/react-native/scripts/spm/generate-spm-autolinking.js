@@ -71,9 +71,10 @@ const {log} = makeLogger('generate-spm-autolinking');
 
 // Targets compiling against React get all headers via SPM product
 // dependencies — no search-path flags: React/react namespaces from the React
-// binaryTarget, every other namespace from the ReactNativeHeaders
-// binaryTarget, and the app's generated headers from the ReactAppHeaders
-// target in the codegen package.
+// binaryTarget, every other RN namespace from the ReactNativeHeaders
+// binaryTarget (pure-RN), the third-party deps namespaces (folly/glog/
+// boost/...) from the ReactNativeDependenciesHeaders sidecar, and the app's
+// generated headers from the ReactAppHeaders target in the codegen package.
 //
 // Remote mode (remotePackageConfig): the ReactNative-family products come
 // from the single remote package identity instead of the local path-based
@@ -93,6 +94,7 @@ function reactProductDeps() /*: string */ {
   return (
     `.product(name: "ReactNative", package: "${rn}")` +
     `, .product(name: "ReactNativeHeaders", package: "${rn}")` +
+    `, .product(name: "ReactNativeDependenciesHeaders", package: "${rn}")` +
     ', .product(name: "ReactAppHeaders", package: "React-GeneratedCode")'
   );
 }
@@ -750,10 +752,11 @@ function autolinkingDepToSpmTarget(
  * xcframeworksRelPath – path to the xcframeworks sub-package relative to the
  *   autolinked/ directory (e.g. "../build/xcframeworks"). When non-null a
  *   React dependency is declared. Headers need no search paths — React/react
- *   come from the React binaryTarget, every other namespace from
- *   ReactNativeHeaders, and the app's generated headers from the
- *   ReactAppHeaders product — so <React/...>, <ReactCommon/...>,
- *   <react/renderer/...>, folly/glog/boost, and <ReactCodegen/...> all resolve.
+ *   come from the React binaryTarget, every other RN namespace from
+ *   ReactNativeHeaders, folly/glog/boost from ReactNativeDependenciesHeaders,
+ *   and the app's generated headers from the ReactAppHeaders product — so
+ *   <React/...>, <ReactCommon/...>, <react/renderer/...>, folly/glog/boost,
+ *   and <ReactCodegen/...> all resolve.
  */
 /**
  * Top-level autolinked/Package.swift — a thin aggregator that references each
@@ -917,7 +920,8 @@ ${packageDepsBlock}    targets: [
  * the caller (`reactNativePackagePath` / `codegenPackagePath`), computed from
  * the synth's fixed location under the autolinking dir — the manifest holds no
  * runtime discovery and no absolute paths. Headers are served by the
- * React/ReactNativeHeaders binaryTargets and the ReactAppHeaders product, so no
+ * React/ReactNativeHeaders/ReactNativeDependenciesHeaders binaryTargets and
+ * the ReactAppHeaders product, so no
  * search-path flags are needed. Siblings use their absolute synth path from
  * `siblingSynthAbsolutePaths` (production) or a `siblingPackageBaseRelative`
  * fallback (tests).
@@ -1205,8 +1209,8 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   }
 
   // Whether autolinked targets declare a React dependency at all. Headers are
-  // served by the React/ReactNativeHeaders binaryTargets and the
-  // ReactAppHeaders product — no `-I` flags anywhere.
+  // served by the React/ReactNativeHeaders/ReactNativeDependenciesHeaders
+  // binaryTargets and the ReactAppHeaders product — no `-I` flags anywhere.
   const hasReactDep = xcframeworksRelPath != null;
 
   // Each entry gets a wrapper dir at <outputDir>/packages/<SwiftName>/ that

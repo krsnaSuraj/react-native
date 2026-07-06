@@ -708,7 +708,9 @@ describe('validateArtifactsCache', () => {
   it('returns null when the cache is complete and on disk', () => {
     seedCache({
       React: true,
+      ReactNativeHeaders: true,
       ReactNativeDependencies: true,
+      ReactNativeDependenciesHeaders: true,
       'hermes-engine': true,
     });
     seedHermesHeaders();
@@ -718,12 +720,29 @@ describe('validateArtifactsCache', () => {
   it('reports unstaged Hermes public headers', () => {
     seedCache({
       React: true,
+      ReactNativeHeaders: true,
       ReactNativeDependencies: true,
+      ReactNativeDependenciesHeaders: true,
       'hermes-engine': true,
     });
     // No hermes-headers/hermes dir.
     expect(validateArtifactsCache(tempDir)).toMatch(
       /Hermes public headers not staged/,
+    );
+  });
+
+  it('reports a missing headers companion (pure-RN split)', () => {
+    // ReactNativeDependenciesHeaders is the deps sidecar — without it no
+    // <folly/...>-style include resolves (ReactNativeHeaders is pure-RN).
+    seedCache({
+      React: true,
+      ReactNativeHeaders: true,
+      ReactNativeDependencies: true,
+      'hermes-engine': true,
+    });
+    seedHermesHeaders();
+    expect(validateArtifactsCache(tempDir)).toMatch(
+      /missing entry for "ReactNativeDependenciesHeaders"/,
     );
   });
 
@@ -737,7 +756,12 @@ describe('validateArtifactsCache', () => {
   });
 
   it('reports a missing required entry', () => {
-    seedCache({React: true, ReactNativeDependencies: true});
+    seedCache({
+      React: true,
+      ReactNativeHeaders: true,
+      ReactNativeDependencies: true,
+      ReactNativeDependenciesHeaders: true,
+    });
     expect(validateArtifactsCache(tempDir)).toMatch(
       /missing entry for "hermes-engine"/,
     );
@@ -746,7 +770,9 @@ describe('validateArtifactsCache', () => {
   it('reports an entry whose xcframework dir is gone', () => {
     seedCache({
       React: true,
+      ReactNativeHeaders: true,
       ReactNativeDependencies: true,
+      ReactNativeDependenciesHeaders: true,
       'hermes-engine': false,
     });
     expect(validateArtifactsCache(tempDir)).toMatch(

@@ -92,8 +92,12 @@ const {log} = makeLogger('scaffold-package-swift');
 // name (fixes "package ... doesn't exist" on resolve). v12: preprocessor
 // defines from pod_target_xcconfig emitted as `.define(...)`. v13: ObjC(++)
 // targets get an ambient-import prefix header (Foundation/UIKit) `-include`d,
-// replacing CocoaPods' generated prefix.pch.
-const SCAFFOLDER_VERSION = 17;
+// replacing CocoaPods' generated prefix.pch. v18: React-core deps also get
+// the ReactNativeDependenciesHeaders product (ReactNativeHeaders went
+// pure-RN; folly/glog/boost/... now come from the deps sidecar);
+// publicHeadersPath falls back to "." for root-level-source podspecs
+// (`s.source_files = "*.{h,m,mm}"`) instead of SPM's nonexistent `include/`.
+const SCAFFOLDER_VERSION = 18;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -618,6 +622,9 @@ function emitScaffoldedPackageSwift(
     targetDeps.push(`.product(name: "ReactNative", package: "${rnLabel}")`);
     targetDeps.push(
       `.product(name: "ReactNativeHeaders", package: "${rnLabel}")`,
+    );
+    targetDeps.push(
+      `.product(name: "ReactNativeDependenciesHeaders", package: "${rnLabel}")`,
     );
     targetDeps.push(
       '.product(name: "ReactAppHeaders", package: "React-GeneratedCode")',

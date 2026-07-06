@@ -39,6 +39,7 @@ export type DownloadArgs = {
   output: string | null,
   coreTarball: string | null,
   headersTarball: string | null,
+  depsHeadersTarball: string | null,
 };
 
 export type ResolvedArtifact = {

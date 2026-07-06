@@ -179,6 +179,7 @@ describe('main', () => {
       'ReactNativeDependencies',
       'hermes-engine',
       'ReactNativeHeaders',
+      'ReactNativeDependenciesHeaders',
     ]);
     try {
       run(artifactsDir);
@@ -194,6 +195,15 @@ describe('main', () => {
       expect(fs.existsSync(pkgSwift)).toBe(true);
       const contents = fs.readFileSync(pkgSwift, 'utf8');
       expect(contents).toContain('.binaryTarget(name: "React"');
+      // All five artifacts render as binary targets + products — the two
+      // headers-only companions included.
+      expect(contents).toContain('.binaryTarget(name: "ReactNativeHeaders"');
+      expect(contents).toContain(
+        '.binaryTarget(name: "ReactNativeDependenciesHeaders"',
+      );
+      expect(contents).toContain(
+        '.library(name: "ReactNativeDependenciesHeaders"',
+      );
       // The slot comment is derived from the artifacts dir's trailing path
       // segments (version/flavor), not the --version flag.
       expect(contents).toContain('Cache slot:');
@@ -217,6 +227,7 @@ describe('main', () => {
     const artifactsDir = writeArtifacts([
       'React',
       'ReactNativeDependencies',
+      'ReactNativeDependenciesHeaders',
       'hermes-engine',
     ]);
     try {

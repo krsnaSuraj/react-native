@@ -7,6 +7,7 @@
  * @format
  */
 
+// @flow
 const {log, sleep} = require('./utils');
 
 const SLEEP_S = 60; // 1 minute
@@ -15,23 +16,49 @@ const ARTIFACT_URL =
   'https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/';
 const ARTIFACT_NAME = 'react-native-artifacts-';
 
+// The classifier-suffixed tarballs attached to the react-native-artifacts
+// publication (external-artifacts/build.gradle.kts). The POM check alone
+// would pass even when a classifier artifact never made it to Maven.
+const ARTIFACT_CLASSIFIERS = [
+  'reactnative-core-debug',
+  'reactnative-core-release',
+  'reactnative-dependencies-debug',
+  'reactnative-dependencies-release',
+  'reactnative-headers-debug',
+  'reactnative-headers-release',
+  'reactnative-dependencies-headers-debug',
+  'reactnative-dependencies-headers-release',
+];
+
 async function verifyArtifactsAreOnMaven(version, retries = MAX_RETRIES) {
   if (version.startsWith('v')) {
     version = version.substring(1);
   }
 
-  const artifactUrl = `${ARTIFACT_URL}${version}/${ARTIFACT_NAME}${version}.pom`;
+  const urls = [
+    `${ARTIFACT_URL}${version}/${ARTIFACT_NAME}${version}.pom`,
+    ...ARTIFACT_CLASSIFIERS.map(
+      classifier =>
+        `${ARTIFACT_URL}${version}/${ARTIFACT_NAME}${version}-${classifier}.tar.gz`,
+    ),
+  ];
   for (let currentAttempt = 1; currentAttempt <= retries; currentAttempt++) {
-    const response = await fetch(artifactUrl);
+    let missingUrl = null;
+    for (const url of urls) {
+      const response = await fetch(url, {method: 'HEAD'});
+      if (response.status !== 200) {
+        missingUrl = url;
+        break;
+      }
+    }
 
-    if (response.status !== 200) {
-      log(
-        `${currentAttempt}) Artifact's for version ${version} are not on maven yet.\nURL: ${artifactUrl}\nLet's wait a minute and try again.\n`,
-      );
-      await sleep(SLEEP_S);
-    } else {
+    if (missingUrl == null) {
       return;
     }
+    log(
+      `${currentAttempt}) Artifact's for version ${version} are not on maven yet.\nURL: ${missingUrl}\nLet's wait a minute and try again.\n`,
+    );
+    await sleep(SLEEP_S);
   }
 
   log(

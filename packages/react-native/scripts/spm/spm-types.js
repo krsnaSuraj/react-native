@@ -338,6 +338,11 @@ export type SpmScaffoldSpec = {
   // Public-headers strategy. `mappingsDir` (when set) drives publicHeadersPath
   // so the autolinker's centralized headers tree exposes `#import <SwiftName/...>`.
   publicHeadersPath: ?string,
+  // Root-level headers (podspecs like `s.source_files = "*.{h,m,mm}"`) that the
+  // scaffold writer mirrors into a generated include/<SwiftName>/ shim dir so
+  // the CocoaPods header-map spelling `#import <SwiftName/Header.h>` resolves
+  // for dependents (publicHeadersPath is then "include").
+  namespacedShimHeaders: Array<string>,
   // File paths (relative to dep root) the emitter should declare as `.copy(...)`
   // resources on the target.
   resources: Array<string>,

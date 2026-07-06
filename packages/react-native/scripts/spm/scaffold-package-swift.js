@@ -390,6 +390,18 @@ function translatePodspecToSpmTarget(
       );
     }
   }
+  // Never self-ingest scaffold artifacts: a re-scaffold runs with the
+  // previous run's output on disk, and root-level podspec globs sweep it
+  // into sources — `*.{h,...,swift}` matches Package.swift itself, whose
+  // `.swift` extension then trips the mixed-language gate into DELETING the
+  // manifest it just wrote (alternating scaffold/self-destruct runs); the
+  // prefix header and the include/ shim mirror would similarly feed back.
+  expandedSources = expandedSources.filter(
+    f =>
+      f !== SCAFFOLD_PREFIX_HEADER &&
+      f !== 'Package.swift' &&
+      !f.startsWith('include/'),
+  );
 
   // Header-map emulation: CocoaPods builds a header map (USE_HEADERMAP=YES by
   // default) so a source can `#import "Foo.h"` by bare name regardless of which
@@ -457,6 +469,22 @@ function translatePodspecToSpmTarget(
       }
     }
   }
+  let namespacedShimHeaders /*: Array<string> */ = [];
+  if (publicHeadersPath == null) {
+    // Root-level podspecs (`s.source_files = "*.{h,m,mm}"`) keep their
+    // headers in the package root. CocoaPods exposes them to dependents as
+    // `#import <PodName/Header.h>` via header maps; SPM has no equivalent, so
+    // the scaffold writer mirrors them into a generated include/<SwiftName>/
+    // shim dir and publicHeadersPath points there (also fixing SPM's
+    // rejection over the nonexistent default `include/`).
+    const rootHeaders = expandedSources.filter(
+      f => f.endsWith('.h') && !f.includes('/'),
+    );
+    if (rootHeaders.length > 0) {
+      namespacedShimHeaders = rootHeaders;
+      publicHeadersPath = 'include';
+    }
+  }
   if (publicHeadersPath == null) {
     warnings.push(
       `Could not infer publicHeadersPath from source globs. SPM may reject the target — add a publicHeadersPath manually to the scaffolded Package.swift.`,
@@ -475,6 +503,7 @@ function translatePodspecToSpmTarget(
     weakFrameworks: model.weakFrameworks,
     compilerFlags: model.compilerFlags,
     publicHeadersPath,
+    namespacedShimHeaders,
     resources: model.resources,
     warnings,
   };
@@ -960,6 +989,23 @@ function scaffoldPackageSwiftForDep(
         'utf8',
       );
     }
+    // Mirror root-level headers into the generated include/<SwiftName>/ shim
+    // dir (publicHeadersPath) so dependents can use the CocoaPods header-map
+    // spelling `#import <SwiftName/Header.h>`.
+    if (spec.namespacedShimHeaders.length > 0) {
+      const shimDir = path.join(dep.root, 'include', spec.swiftName);
+      fs.mkdirSync(shimDir, {recursive: true});
+      for (const header of spec.namespacedShimHeaders) {
+        fs.writeFileSync(
+          path.join(shimDir, header),
+          `// AUTO-SCAFFOLDED by react-native spm scaffold — the namespaced\n` +
+            `// spelling (<${spec.swiftName}/${header}>) of the package-root header,\n` +
+            `// matching how CocoaPods header maps expose it.\n` +
+            `#import "../../${header}"\n`,
+          'utf8',
+        );
+      }
+    }
   }
 
   return {
@@ -1070,6 +1116,21 @@ function scaffoldAll(
     const podspecPath = dep.platforms?.ios?.podspecPath;
     if (typeof podspecPath === 'string' && podspecPath.length > 0) {
       podToNpm.set(path.basename(podspecPath, '.podspec'), dep.name);
+    } else {
+      // Transitive entries synthesized by expandSpmDependencies (declared via
+      // `spm.dependencies` in react-native.config.js) carry no podspecPath —
+      // discover the podspec at the dep root so podspec-name sibling deps
+      // (e.g. `s.dependency "TestLibraryCommon"`) still wire to their npm
+      // package.
+      try {
+        for (const f of fs.readdirSync(dep.root)) {
+          if (f.endsWith('.podspec')) {
+            podToNpm.set(path.basename(f, '.podspec'), dep.name);
+          }
+        }
+      } catch {
+        // unreadable dep root — sibling wiring falls back to the warning path
+      }
     }
   }
 

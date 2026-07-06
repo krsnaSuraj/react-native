@@ -96,6 +96,10 @@ type BuildSettingChange = {
   createdArrayKeys: Array<string>,
   appendedArrayValues: {[string]: Array<string>},
   createdScalars: Array<string>,
+  // Scalars whose pre-injection value was replaced (key → original raw
+  // value), e.g. a ${PODS_ROOT}-anchored REACT_NATIVE_PATH that dangles once
+  // CocoaPods is deintegrated. Deinit restores the original.
+  replacedScalars?: {[string]: string},
 };
 type SpmGraph = {
   uniquePackages: Array<{packagePath: string, packageName: string}>,
@@ -942,19 +946,44 @@ function mergeReactBuildSettings(
     }
     text = addArrayStringValues(text, d, key, values);
   }
+  const replacedScalars /*: {[string]: string} */ = {};
   for (const {key, value} of scalars) {
     const d = dict();
     if (d == null) {
       continue;
     }
-    if (findField(text, d, key) == null) {
+    const existing = findField(text, d, key);
+    if (existing == null) {
       createdScalars.push(key);
+    } else if (
+      key === 'REACT_NATIVE_PATH' &&
+      existing.value.includes('PODS_ROOT')
+    ) {
+      // A ${PODS_ROOT}-anchored REACT_NATIVE_PATH (the CocoaPods template
+      // default) dangles once CocoaPods is deintegrated: PODS_ROOT resolves
+      // empty at build time, so the Bundle React Native code and images
+      // phase looks for "/../…/scripts/xcode/with-environment.sh". Replace
+      // it with the SPM-computed path, recording the original for deinit.
+      replacedScalars[key] = existing.value;
+      text = removeField(text, d, key);
+      const d2 = dict();
+      if (d2 == null) {
+        continue;
+      }
+      text = ensureScalarField(text, d2, key, value);
+      continue;
     }
     text = ensureScalarField(text, d, key, value);
   }
   return {
     text,
-    change: {configUuid, createdArrayKeys, appendedArrayValues, createdScalars},
+    change: {
+      configUuid,
+      createdArrayKeys,
+      appendedArrayValues,
+      createdScalars,
+      replacedScalars,
+    },
   };
 }
 
@@ -1268,6 +1297,17 @@ function removeSpmInjection(
       const d = dict();
       if (d != null) {
         text = removeField(text, d, key);
+      }
+    }
+    const replaced = change.replacedScalars ?? {};
+    for (const key of Object.keys(replaced)) {
+      const d = dict();
+      if (d != null) {
+        text = removeField(text, d, key);
+        const d2 = dict();
+        if (d2 != null) {
+          text = ensureScalarField(text, d2, key, replaced[key]);
+        }
       }
     }
   }

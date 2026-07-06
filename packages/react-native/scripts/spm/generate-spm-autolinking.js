@@ -1570,10 +1570,12 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   }
   for (const absSource of entryAbsDirs.values()) {
     const legacyPkg = path.join(absSource, 'Package.swift');
+    let removedLegacyPkg = false;
     try {
       const content = fs.readFileSync(legacyPkg, 'utf8');
       if (content.includes(AUTOGEN_MARKER)) {
         fs.unlinkSync(legacyPkg);
+        removedLegacyPkg = true;
         log(
           `Removed legacy in-place synth: ${path.relative(appRoot, legacyPkg)}`,
         );
@@ -1581,16 +1583,23 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     } catch {
       // not present – fine
     }
-    const legacyInclude = path.join(absSource, 'include');
-    try {
-      if (fs.lstatSync(legacyInclude).isDirectory()) {
-        fs.rmSync(legacyInclude, {recursive: true, force: true});
-        log(
-          `Removed legacy in-place include/: ${path.relative(appRoot, legacyInclude)}`,
-        );
+    // Only treat include/ as a legacy leftover when the in-place synth
+    // manifest was just removed alongside it: a SCAFFOLDED dep legitimately
+    // owns include/<SwiftName>/ (the namespaced shim headers behind its
+    // publicHeadersPath: "include") — nuking it unconditionally would break
+    // every dependent's `#import <SwiftName/Header.h>` on the next sync.
+    if (removedLegacyPkg) {
+      const legacyInclude = path.join(absSource, 'include');
+      try {
+        if (fs.lstatSync(legacyInclude).isDirectory()) {
+          fs.rmSync(legacyInclude, {recursive: true, force: true});
+          log(
+            `Removed legacy in-place include/: ${path.relative(appRoot, legacyInclude)}`,
+          );
+        }
+      } catch {
+        // not present – fine
       }
-    } catch {
-      // not present – fine
     }
   }
 }

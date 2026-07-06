@@ -167,9 +167,11 @@ jobs:
         if: steps.restore-ios-xcframework.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # ReactNativeHeaders.xcframework (built by the compose step) folds in
-          # the third-party deps namespaces (folly/glog/boost/...), so the deps
-          # headers must be staged here too — not just in build-slices.
+          # ReactNativeHeaders.xcframework is pure-RN (the deps namespaces ship
+          # in the ReactNativeDependenciesHeaders sidecar built by the deps
+          # prebuild), but the headers-verify compile gates still need the deps
+          # headers on their include path (folly/glog/... reached from RN's
+          # public headers), so the deps artifact is staged here too.
           tar -xzf /tmp/third-party/ReactNativeDependencies${{ matrix.flavor }}.xcframework.tar.gz -C /tmp/third-party/
           mkdir -p packages/react-native/third-party/
           mv /tmp/third-party/packages/react-native/third-party/ReactNativeDependencies.xcframework packages/react-native/third-party/ReactNativeDependencies.xcframework

@@ -28,7 +28,7 @@
  *   1. Ensures xcframework artifacts are downloaded (auto-heals fresh clones)
  *   2. Calls generate-spm-autolinking.js → build/generated/autolinking/Package.swift
  *   3. Calls generate-spm-package.js → build/xcframeworks/Package.swift + symlinks
- *   4. Installs the codegen template + resolves the VFS overlay template
+ *   4. Installs the codegen template + rebuilds the generated-headers farm
  *   5. Writes build/generated/autolinking/.spm-sync-stamp
  */
 

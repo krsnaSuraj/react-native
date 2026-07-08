@@ -913,6 +913,18 @@ function mergeReactBuildSettings(
   const scalars = [
     {key: 'CLANG_CXX_LANGUAGE_STANDARD', value: '"c++20"'},
     {key: 'REACT_NATIVE_PATH', value: quoteIfNeeded(reactNativePath)},
+    // Under SwiftPM there is no hermes-engine pod, so react-native-xcode.sh's
+    // fallback ($PODS_ROOT/hermes-engine/destroot/bin/hermesc) resolves to a
+    // non-existent "/hermes-engine/..." and the Release JS→Hermes bundling
+    // fails. Point HERMES_CLI_PATH at the hermes-compiler npm package's host
+    // hermesc (sibling of react-native in node_modules). react-native-xcode.sh
+    // honors an already-set HERMES_CLI_PATH before its pod fallback; the
+    // ensureScalarField below leaves any user-provided value untouched.
+    {
+      key: 'HERMES_CLI_PATH',
+      value:
+        '"$(REACT_NATIVE_PATH)/../hermes-compiler/hermesc/osx-bin/hermesc"',
+    },
   ];
   // Re-locate the buildSettings dict before each edit (offsets shift).
   const dict = () => {

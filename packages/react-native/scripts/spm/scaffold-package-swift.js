@@ -97,7 +97,10 @@ const {log} = makeLogger('scaffold-package-swift');
 // pure-RN; folly/glog/boost/... now come from the deps sidecar);
 // publicHeadersPath falls back to "." for root-level-source podspecs
 // (`s.source_files = "*.{h,m,mm}"`) instead of SPM's nonexistent `include/`.
-const SCAFFOLDER_VERSION = 18;
+// v19: scaffolded C++ targets carry DEBUG/NDEBUG config defines so their Fabric
+// ABI matches the prebuilt React.framework (Release strips DebugStringConvertible
+// under NDEBUG). Bumped so existing scaffolds regenerate with the defines.
+const SCAFFOLDER_VERSION = 19;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -110,6 +113,15 @@ const AUTOGEN_MARKER =
 // target (cSettings + cxxSettings) to reproduce that ambient import. The
 // `__OBJC__` guard makes it inert for plain C/C++ sources, and UIKit is
 // `__has_include`-guarded for platforms that lack it.
+// The config-gated C++ defines the prebuilt React.framework is built with (see
+// packages/react-native/Package.swift). Fabric C++ in autolinked deps must
+// compile with the SAME NDEBUG state or its DebugStringConvertible / ShadowNode
+// ABI diverges from the Release React.framework and the link fails.
+const REACT_CXX_CONFIG_DEFINES = [
+  '.define("DEBUG", .when(configuration: .debug))',
+  '.define("NDEBUG", .when(configuration: .release))',
+];
+
 const SCAFFOLD_PREFIX_HEADER = 'react-native-spm-prefix.h';
 const SCAFFOLD_PREFIX_HEADER_CONTENTS = `// AUTO-SCAFFOLDED by react-native spm scaffold — mirrors CocoaPods' default
 // prefix header so ObjC sources that rely on an implicit Foundation/UIKit
@@ -606,6 +618,12 @@ function emitScaffoldedPackageSwift(
       ...(customFlagsCxx.length > 0
         ? [`.unsafeFlags([${customFlagsCxx.join(', ')}])`]
         : []),
+      // Match the prebuilt React.framework's config-gated C++ ABI. NDEBUG in
+      // Release strips DebugStringConvertible's vtable (and shifts the
+      // ShadowNode layout that inherits it), so a Fabric C++ target compiled
+      // WITHOUT NDEBUG fails to link against a Release React.framework. Mirrors
+      // packages/react-native/Package.swift's own C++ targets.
+      ...REACT_CXX_CONFIG_DEFINES,
     ].filter(e => e.length > 0),
   );
 

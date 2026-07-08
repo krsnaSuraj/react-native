@@ -272,6 +272,14 @@ describe('generateSynthPackageSwift', () => {
     );
   });
 
+  it('emits DEBUG/NDEBUG config-gated cxxSettings so Fabric C++ matches the prebuilt React.framework ABI', () => {
+    const result = generateSynthPackageSwift(baseSpec());
+    expect(result).toContain('.define("DEBUG", .when(configuration: .debug))');
+    expect(result).toContain(
+      '.define("NDEBUG", .when(configuration: .release))',
+    );
+  });
+
   it('depends on ReactNative via a fixed relative path (default synth depth)', () => {
     const result = generateSynthPackageSwift(baseSpec({hasReactDep: true}));
     expect(result).toContain(
@@ -1048,7 +1056,10 @@ describe('main() — autolinking plugin host exemption', () => {
     // The plugin-host dep: native sources present, but NO Package.swift.
     const expoDir = path.join(appRoot, 'node_modules', 'expo');
     fs.mkdirSync(path.join(expoDir, 'ios'), {recursive: true});
-    fs.writeFileSync(path.join(expoDir, 'ios', 'Expo.mm'), '// native source\n');
+    fs.writeFileSync(
+      path.join(expoDir, 'ios', 'Expo.mm'),
+      '// native source\n',
+    );
     if (withPlugin) {
       fs.writeFileSync(
         path.join(expoDir, 'react-native.config.js'),

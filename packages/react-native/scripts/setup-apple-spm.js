@@ -535,8 +535,20 @@ function prepareLocalXcframeworkArtifacts(
     {};
   artifacts.React = {xcframeworkPath: localReactPath, url: ''};
 
-  // Look for ReactNativeDependencies and hermes-engine alongside or in cache
-  for (const name of ['ReactNativeDependencies', 'hermes-engine']) {
+  // Look for the deps binary, hermes, AND both headers companions alongside the
+  // React.xcframework or in the cache. The headers-only companions ship beside
+  // their binaries in the same tarball (ReactNativeHeaders beside React;
+  // ReactNativeDependenciesHeaders beside ReactNativeDependencies), so a
+  // `--artifacts <local React.xcframework>` slot extracted from the tarballs has
+  // them as siblings. They are REQUIRED (validateArtifactsCache /
+  // generate-spm-package both need them) — omitting them made the local slot
+  // report incomplete and forced a full Maven download, defeating "use directly".
+  for (const name of [
+    'ReactNativeHeaders',
+    'ReactNativeDependencies',
+    'ReactNativeDependenciesHeaders',
+    'hermes-engine',
+  ]) {
     const siblingPath = path.join(localXcfwDir, `${name}.xcframework`);
     const cachePath = path.join(
       defaultCacheDir(args.version ?? version, args.flavor),

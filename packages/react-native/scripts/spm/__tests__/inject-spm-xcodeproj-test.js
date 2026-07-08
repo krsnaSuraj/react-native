@@ -147,6 +147,12 @@ describe('injectSpmIntoPbxproj — Tier 2 (build settings + phase)', () => {
     expect(text.match(/CLANG_CXX_LANGUAGE_STANDARD = "c\+\+20"/g)).toHaveLength(
       2,
     );
+    // HERMES_CLI_PATH points react-native-xcode.sh at the hermes-compiler npm
+    // package (no hermes-engine pod under SPM), injected into both configs.
+    expect(text.match(/HERMES_CLI_PATH = /g)).toHaveLength(2);
+    expect(text).toContain(
+      '$(REACT_NATIVE_PATH)/../hermes-compiler/hermesc/osx-bin/hermesc',
+    );
   });
 
   it('prepends the Sync SPM Autolinking build phase', () => {

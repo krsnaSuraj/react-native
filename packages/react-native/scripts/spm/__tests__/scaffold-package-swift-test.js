@@ -525,6 +525,12 @@ describe('emitScaffoldedPackageSwift', () => {
     expect(out).toContain('// Cache slot: 0.87.0-nightly-20260513-abc/debug');
   });
 
+  it('emits DEBUG/NDEBUG config-gated cxxSettings so Fabric C++ matches the prebuilt React.framework ABI', () => {
+    const out = emitScaffoldedPackageSwift(baseSpec());
+    expect(out).toContain('.define("DEBUG", .when(configuration: .debug))');
+    expect(out).toContain('.define("NDEBUG", .when(configuration: .release))');
+  });
+
   it('is fully declarative — no runtime discovery code, no Foundation import', () => {
     const out = emitScaffoldedPackageSwift(baseSpec());
     expect(out).not.toContain('import Foundation');

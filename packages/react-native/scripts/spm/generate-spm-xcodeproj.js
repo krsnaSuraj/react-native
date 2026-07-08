@@ -759,6 +759,7 @@ function injectSpmIntoPbxproj(
   plan /*: {rootUuid: string, targetUuid: string, configUuids: Array<string>, frameworksPhaseUuid: string} */,
   reactNativePath /*: string */,
   remote /*: ?RemoteCfg */,
+  hermesCliPath /*: ?string */ = null,
 ) /*: {text: string, injectedUuids: Array<string>, createdArrayFields: Array<{container: 'project' | 'target', key: string}>, buildSettingChanges: Array<BuildSettingChange>} */ {
   let text = input;
   const mkUuid = (section /*: string */, id /*: string */) =>
@@ -853,7 +854,12 @@ function injectSpmIntoPbxproj(
   // 5. React build settings into every build config (Debug + Release).
   const buildSettingChanges /*: Array<BuildSettingChange> */ = [];
   for (const configUuid of plan.configUuids) {
-    const merged = mergeReactBuildSettings(text, configUuid, reactNativePath);
+    const merged = mergeReactBuildSettings(
+      text,
+      configUuid,
+      reactNativePath,
+      hermesCliPath,
+    );
     text = merged.text;
     buildSettingChanges.push(merged.change);
   }
@@ -904,10 +910,46 @@ function findApplicationTargetByUuid(
  * a value the user already had (key insight: ensureScalarField/
  * addArrayStringValues are no-ops / dedupe when a value is already present).
  */
+/**
+ * Resolves the host `hermesc` from the `hermes-compiler` npm package and returns
+ * its ABSOLUTE path as the HERMES_CLI_PATH value, or null when it can't be found
+ * (e.g. USE_HERMES=false apps without the package). require.resolve (anchored at
+ * reactNativeRoot) follows Node's lookup, so a hoisted monorepo layout — where
+ * hermes-compiler sits in the workspace-root node_modules, NOT next to
+ * react-native — resolves correctly.
+ *
+ * The value is intentionally ABSOLUTE, not `$(REACT_NATIVE_PATH)/../...`: when
+ * react-native is a symlink (the monorepo default, and common in real apps), a
+ * `..` after it resolves — kernel-side — to the symlink TARGET's parent, not the
+ * node_modules dir, so the relative form points at a non-existent
+ * `<rn-target>/../hermes-compiler`. An absolute path sidesteps that entirely
+ * (and matches how the CocoaPods hermes-engine pod sets HERMES_CLI_PATH). It is
+ * regenerated on every `spm add`, so machine-specificity is a non-issue.
+ */
+function resolveHermesCliPathSetting(
+  reactNativeRoot /*: string */,
+) /*: ?string */ {
+  try {
+    const pkg = require.resolve('hermes-compiler/package.json', {
+      paths: [reactNativeRoot],
+    });
+    const hermesc = path.join(
+      path.dirname(pkg),
+      'hermesc',
+      'osx-bin',
+      'hermesc',
+    );
+    return fs.existsSync(hermesc) ? hermesc : null;
+  } catch {
+    return null;
+  }
+}
+
 function mergeReactBuildSettings(
   input /*: string */,
   configUuid /*: string */,
   reactNativePath /*: string */,
+  hermesCliPath /*: ?string */ = null,
 ) /*: {text: string, change: BuildSettingChange} */ {
   let text = input;
   const scalars = [
@@ -917,14 +959,13 @@ function mergeReactBuildSettings(
     // fallback ($PODS_ROOT/hermes-engine/destroot/bin/hermesc) resolves to a
     // non-existent "/hermes-engine/..." and the Release JS→Hermes bundling
     // fails. Point HERMES_CLI_PATH at the hermes-compiler npm package's host
-    // hermesc (sibling of react-native in node_modules). react-native-xcode.sh
-    // honors an already-set HERMES_CLI_PATH before its pod fallback; the
-    // ensureScalarField below leaves any user-provided value untouched.
-    {
-      key: 'HERMES_CLI_PATH',
-      value:
-        '"$(REACT_NATIVE_PATH)/../hermes-compiler/hermesc/osx-bin/hermesc"',
-    },
+    // hermesc (an ABSOLUTE path resolved by the caller — see
+    // resolveHermesCliPathSetting). react-native-xcode.sh honors an already-set
+    // HERMES_CLI_PATH before its pod fallback; ensureScalarField leaves any
+    // user-provided value untouched.
+    ...(hermesCliPath != null
+      ? [{key: 'HERMES_CLI_PATH', value: quoteIfNeeded(hermesCliPath)}]
+      : []),
   ];
   // Re-locate the buildSettings dict before each edit (offsets shift).
   const dict = () => {
@@ -1161,6 +1202,7 @@ function injectSpmIntoExistingXcodeproj(
   }
   const reactNativePath = path.relative(appRoot, reactNativeRoot);
   const remote = remotePackageConfig(appRoot);
+  const hermesCliPath = resolveHermesCliPathSetting(reactNativeRoot);
   const {text, injectedUuids, createdArrayFields, buildSettingChanges} =
     injectSpmIntoPbxproj(
       original,
@@ -1172,6 +1214,7 @@ function injectSpmIntoExistingXcodeproj(
       },
       reactNativePath,
       remote,
+      hermesCliPath,
     );
 
   const changed = writeIfChanged(pbxprojPath, text);

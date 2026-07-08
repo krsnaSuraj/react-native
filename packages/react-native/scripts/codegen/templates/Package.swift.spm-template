@@ -53,7 +53,17 @@ let package = Package(
             exclude: ["ReactCodegen.podspec"],
             publicHeadersPath: ".",
             cSettings: [.headerSearchPath("headers")],
-            cxxSettings: [.headerSearchPath("headers")],
+            // DEBUG/NDEBUG match the prebuilt React.framework's config-gated C++
+            // ABI: NDEBUG (Release) strips DebugStringConvertible's vtable and
+            // shifts the ShadowNode layout that codegen'd Props inherit, so this
+            // target must compile with the same NDEBUG state or the Release link
+            // fails (undefined "vtable for DebugStringConvertible"). Mirrors
+            // packages/react-native/Package.swift.
+            cxxSettings: [
+                .headerSearchPath("headers"),
+                .define("DEBUG", .when(configuration: .debug)),
+                .define("NDEBUG", .when(configuration: .release)),
+            ],
             linkerSettings: [
                 .linkedFramework("Foundation")
             ]
@@ -65,7 +75,13 @@ let package = Package(
             exclude: ["ReactAppDependencyProvider.podspec"],
             publicHeadersPath: ".",
             cSettings: [.headerSearchPath(".."), .headerSearchPath("headers")],
-            cxxSettings: [.headerSearchPath(".."), .headerSearchPath("headers")],
+            cxxSettings: [
+                .headerSearchPath(".."),
+                .headerSearchPath("headers"),
+                // Match the prebuilt React.framework NDEBUG-gated C++ ABI (see above).
+                .define("DEBUG", .when(configuration: .debug)),
+                .define("NDEBUG", .when(configuration: .release)),
+            ],
             linkerSettings: [
                 .linkedFramework("Foundation")
             ]

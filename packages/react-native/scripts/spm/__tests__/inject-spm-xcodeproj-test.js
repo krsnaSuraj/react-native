@@ -31,7 +31,12 @@ const PODS = PLAIN.replace(
 
 const RN_PATH = '../node_modules/react-native';
 
-function inject(text, remote = null) {
+// Absolute, mirroring resolveHermesCliPathSetting (a `..`-relative path through
+// a symlinked react-native would resolve to the wrong dir at build time).
+const TEST_HERMES_CLI_PATH =
+  '/abs/node_modules/hermes-compiler/hermesc/osx-bin/hermesc';
+
+function inject(text, remote = null, hermesCliPath = TEST_HERMES_CLI_PATH) {
   const plan = planInjection(text, {});
   expect(plan.ok).toBe(true);
   return injectSpmIntoPbxproj(
@@ -44,6 +49,7 @@ function inject(text, remote = null) {
     },
     RN_PATH,
     remote,
+    hermesCliPath,
   );
 }
 
@@ -150,9 +156,12 @@ describe('injectSpmIntoPbxproj — Tier 2 (build settings + phase)', () => {
     // HERMES_CLI_PATH points react-native-xcode.sh at the hermes-compiler npm
     // package (no hermes-engine pod under SPM), injected into both configs.
     expect(text.match(/HERMES_CLI_PATH = /g)).toHaveLength(2);
-    expect(text).toContain(
-      '$(REACT_NATIVE_PATH)/../hermes-compiler/hermesc/osx-bin/hermesc',
-    );
+    expect(text).toContain(TEST_HERMES_CLI_PATH);
+  });
+
+  it('omits HERMES_CLI_PATH when hermesc could not be resolved', () => {
+    const {text} = inject(PLAIN, null, null);
+    expect(text).not.toContain('HERMES_CLI_PATH');
   });
 
   it('prepends the Sync SPM Autolinking build phase', () => {

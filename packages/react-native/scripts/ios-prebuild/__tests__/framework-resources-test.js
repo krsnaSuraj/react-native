@@ -17,7 +17,10 @@ const {
   collectReactPrivacyManifestPaths,
   i18nBundleInfoPlist,
   mergePrivacyManifests,
+  readPrivacyManifest,
+  serializePrivacyManifest,
 } = require('../framework-resources');
+const {emitReactFrameworkHeaders} = require('../headers-compose');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -128,6 +131,57 @@ describe('mergePrivacyManifests', () => {
     ]);
     expect(merged.NSPrivacyCollectedDataTypes).toHaveLength(1);
   });
+
+  it('dedups collected data types regardless of source key order', () => {
+    // Same dict, different key order (order comes from each plist) must dedup.
+    const merged = mergePrivacyManifests([
+      {
+        NSPrivacyCollectedDataTypes: [
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+            NSPrivacyCollectedDataTypeLinked: false,
+          },
+        ],
+      },
+      {
+        NSPrivacyCollectedDataTypes: [
+          {
+            NSPrivacyCollectedDataTypeLinked: false,
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+          },
+        ],
+      },
+    ]);
+    expect(merged.NSPrivacyCollectedDataTypes).toHaveLength(1);
+  });
+
+  it('does not fabricate a reasons key when the source omitted it', () => {
+    const merged = mergePrivacyManifests([
+      {
+        NSPrivacyAccessedAPITypes: [
+          {NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryOther'},
+        ],
+      },
+    ]);
+    const entry = merged.NSPrivacyAccessedAPITypes[0];
+    expect(entry.NSPrivacyAccessedAPIType).toBe(
+      'NSPrivacyAccessedAPICategoryOther',
+    );
+    expect('NSPrivacyAccessedAPITypeReasons' in entry).toBe(false);
+  });
+});
+
+describe('serialize/read privacy-manifest round-trip', () => {
+  it('serialize -> readPrivacyManifest yields the same object (guards the plist.build byte shape)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'privacy-rt-'));
+    const file = path.join(tmp, 'PrivacyInfo.xcprivacy');
+    try {
+      fs.writeFileSync(file, serializePrivacyManifest(reactCore));
+      expect(readPrivacyManifest(file)).toEqual(reactCore);
+    } finally {
+      fs.rmSync(tmp, {recursive: true, force: true});
+    }
+  });
 });
 
 describe('buildReactPrivacyManifest (against the real source tree)', () => {
@@ -164,6 +218,9 @@ describe('i18nBundleInfoPlist', () => {
     expect(typeof info.CFBundleIdentifier).toBe('string');
     expect(info.CFBundleIdentifier.length).toBeGreaterThan(0);
     expect(typeof info.CFBundleDevelopmentRegion).toBe('string');
+    // Versioned so Apple validation tooling doesn't warn on a version-less bundle.
+    expect(info.CFBundleShortVersionString).toBeDefined();
+    expect(info.CFBundleVersion).toBeDefined();
   });
 });
 
@@ -211,5 +268,67 @@ describe('buildI18nStringsBundle', () => {
     expect(count).toBe(0);
     expect(fs.existsSync(out)).toBe(false);
     fs.rmSync(emptyRn, {recursive: true, force: true});
+  });
+});
+
+describe('emitReactFrameworkHeaders resource landing (integration)', () => {
+  let tmp;
+  let rnRoot;
+  let xcfw;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'emit-res-'));
+
+    // Minimal fake source tree: one privacy manifest + one locale.
+    rnRoot = path.join(tmp, 'rn');
+    const privacyDir = path.join(rnRoot, 'React', 'Resources');
+    fs.mkdirSync(privacyDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(privacyDir, 'PrivacyInfo.xcprivacy'),
+      serializePrivacyManifest(reactCore),
+    );
+    const lproj = path.join(rnRoot, 'React', 'I18n', 'strings', 'en.lproj');
+    fs.mkdirSync(lproj, {recursive: true});
+    fs.writeFileSync(
+      path.join(lproj, 'Localizable.strings'),
+      '"key" = "value";\n',
+    );
+
+    // Two-slice xcframework, each carrying an empty React.framework.
+    xcfw = path.join(tmp, 'React.xcframework');
+    for (const slice of ['ios-arm64', 'ios-arm64_x86_64-simulator']) {
+      fs.mkdirSync(path.join(xcfw, slice, 'React.framework'), {
+        recursive: true,
+      });
+    }
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, {recursive: true, force: true});
+  });
+
+  it('lands PrivacyInfo.xcprivacy and RCTI18nStrings.bundle into EVERY slice', () => {
+    // Empty header plan — this test targets the non-header resources only.
+    emitReactFrameworkHeaders(
+      xcfw,
+      {
+        react: [],
+        umbrella: [],
+        privateReactHeaders: {modular: [], textual: []},
+      },
+      rnRoot,
+    );
+
+    for (const slice of ['ios-arm64', 'ios-arm64_x86_64-simulator']) {
+      const fwk = path.join(xcfw, slice, 'React.framework');
+      expect(fs.existsSync(path.join(fwk, 'PrivacyInfo.xcprivacy'))).toBe(true);
+      const bundle = path.join(fwk, 'RCTI18nStrings.bundle');
+      expect(fs.existsSync(path.join(bundle, 'Info.plist'))).toBe(true);
+      expect(fs.existsSync(path.join(bundle, 'en.lproj'))).toBe(true);
+      // The composed module map is present too (proves the slice was rewritten).
+      expect(fs.existsSync(path.join(fwk, 'Modules', 'module.modulemap'))).toBe(
+        true,
+      );
+    }
   });
 });

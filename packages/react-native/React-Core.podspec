@@ -125,7 +125,7 @@ Pod::Spec.new do |s|
   # (not merge) the first. RCTI18nStrings holds React-Core's localized strings
   # (loaded by RCTLocalizedString); React-Core_privacy is the privacy manifest.
   # (Prebuilt/SwiftPM get both from inside React.xcframework instead — see
-  # scripts/ios-prebuild/{i18n,privacy}.js — but source builds ship them here.)
+  # scripts/ios-prebuild/framework-resources.js — but source builds ship them here.)
   s.resource_bundles = {
     'RCTI18nStrings' => ['React/I18n/strings/*.lproj'],
     'React-Core_privacy' => 'React/Resources/PrivacyInfo.xcprivacy',

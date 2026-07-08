@@ -149,7 +149,15 @@ function emitReactFrameworkHeaders(
   // for both CocoaPods-prebuilt and SwiftPM (source builds get them from the
   // podspecs instead). Built once, embedded per slice.
   const privacyManifest = buildReactPrivacyManifest(rnRoot);
-  let i18nLocales = 0;
+
+  // Build RCTI18nStrings.bundle ONCE into a temp stage, then clone it into each
+  // slice below — mirrors the privacy manifest (computed once, embedded per
+  // slice) instead of rebuilding the bundle inside the slice loop.
+  const i18nStage = fs.mkdtempSync(
+    path.join(path.dirname(xcfwPath), '.i18n-stage-'),
+  );
+  const i18nBundleStage = path.join(i18nStage, 'RCTI18nStrings.bundle');
+  const i18nLocales = buildI18nStringsBundle(rnRoot, i18nBundleStage);
 
   for (const slice of slices) {
     const fwk = path.join(xcfwPath, slice, 'React.framework');
@@ -167,14 +175,16 @@ function emitReactFrameworkHeaders(
         serializePrivacyManifest(privacyManifest),
       );
     }
-    // Embed React-Core's localized strings as RCTI18nStrings.bundle so the
-    // framework-aware RCTLocalizedString loader resolves them in prebuilt/SPM.
-    i18nLocales = buildI18nStringsBundle(
-      rnRoot,
-      path.join(fwk, 'RCTI18nStrings.bundle'),
-    );
+    // Clone the prebuilt RCTI18nStrings.bundle so the framework-aware
+    // RCTLocalizedString loader resolves React-Core's strings in prebuilt/SPM.
+    if (i18nLocales > 0) {
+      const dest = path.join(fwk, 'RCTI18nStrings.bundle');
+      fs.rmSync(dest, {recursive: true, force: true});
+      execFileSync('/bin/cp', ['-Rc', i18nBundleStage, dest]);
+    }
   }
   fs.rmSync(stage, {recursive: true, force: true});
+  fs.rmSync(i18nStage, {recursive: true, force: true});
   console.log(
     `headers-compose: React.framework spec layout -> ${slices.join(', ')} ` +
       `(${plan.react.length} headers, umbrella ${plan.umbrella.length}` +

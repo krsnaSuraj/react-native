@@ -136,7 +136,7 @@ module RNCoreFacades
 
             # NOTE: the facade carries NO resources. The pods' non-code resources
             # (e.g. the privacy manifest) are embedded directly in the prebuilt
-            # React.xcframework by the ios-prebuild compose (see ios-prebuild/privacy.js),
+            # React.xcframework by the ios-prebuild compose (see ios-prebuild/framework-resources.js),
             # so they reach both CocoaPods-prebuilt and SwiftPM from the artifact —
             # the facade only needs to declare the React-Core-prebuilt dependency.
 

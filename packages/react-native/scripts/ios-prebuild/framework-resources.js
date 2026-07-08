@@ -55,6 +55,22 @@ type PrivacyManifest = {
 // Privacy manifest
 // ---------------------------------------------------------------------------
 
+// Recursively sorts object keys so structurally-equal values serialize
+// identically regardless of source key order (arrays keep their order).
+function canonicalize(value /*: mixed */) /*: mixed */ {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (value != null && typeof value === 'object') {
+    const out /*: {[string]: mixed} */ = {};
+    for (const k of Object.keys(value).sort()) {
+      out[k] = canonicalize(value[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
 /**
  * Merges Apple privacy manifests into one. Pure; operates on parsed plist
  * objects. Semantics:
@@ -67,6 +83,10 @@ function mergePrivacyManifests(
   manifests /*: Array<?PrivacyManifest> */,
 ) /*: PrivacyManifest */ {
   const reasonsByType /*: Map<string, Array<string>> */ = new Map();
+  // Categories where at least one source actually declared the reasons key, so
+  // a source that omitted it doesn't get a fabricated empty-array key on the way
+  // out (keeps "a single manifest passes through unchanged" honest).
+  const typeHadReasonsKey /*: Set<string> */ = new Set();
   const typeOrder /*: Array<string> */ = [];
   const trackingDomains /*: Set<string> */ = new Set();
   const collected /*: Array<unknown> */ = [];
@@ -83,11 +103,14 @@ function mergePrivacyManifests(
         reasonsByType.set(category, []);
         typeOrder.push(category);
       }
-      const reasons = reasonsByType.get(category);
-      if (reasons != null) {
-        for (const reason of entry.NSPrivacyAccessedAPITypeReasons ?? []) {
-          if (!reasons.includes(reason)) {
-            reasons.push(reason);
+      if (entry.NSPrivacyAccessedAPITypeReasons != null) {
+        typeHadReasonsKey.add(category);
+        const reasons = reasonsByType.get(category);
+        if (reasons != null) {
+          for (const reason of entry.NSPrivacyAccessedAPITypeReasons) {
+            if (!reasons.includes(reason)) {
+              reasons.push(reason);
+            }
           }
         }
       }
@@ -96,7 +119,9 @@ function mergePrivacyManifests(
       trackingDomains.add(domain);
     }
     for (const dataType of manifest.NSPrivacyCollectedDataTypes ?? []) {
-      const key = JSON.stringify(dataType) ?? '';
+      // Canonicalize (sort object keys recursively) before keying so two pods
+      // declaring the same data-type dict in different key order still dedup.
+      const key = JSON.stringify(canonicalize(dataType)) ?? '';
       if (!collectedSeen.has(key)) {
         collectedSeen.add(key);
         collected.push(dataType);
@@ -108,10 +133,16 @@ function mergePrivacyManifests(
   }
 
   const merged /*: PrivacyManifest */ = {
-    NSPrivacyAccessedAPITypes: typeOrder.map(category => ({
-      NSPrivacyAccessedAPIType: category,
-      NSPrivacyAccessedAPITypeReasons: reasonsByType.get(category) ?? [],
-    })),
+    NSPrivacyAccessedAPITypes: typeOrder.map(category => {
+      const entry /*: AccessedAPIType */ = {
+        NSPrivacyAccessedAPIType: category,
+      };
+      if (typeHadReasonsKey.has(category)) {
+        entry.NSPrivacyAccessedAPITypeReasons =
+          reasonsByType.get(category) ?? [];
+      }
+      return entry;
+    }),
     NSPrivacyCollectedDataTypes: collected,
     NSPrivacyTracking: tracking,
   };
@@ -182,6 +213,9 @@ function i18nBundleInfoPlist() /*: {[string]: string} */ {
     CFBundleInfoDictionaryVersion: '6.0',
     CFBundleName: 'RCTI18nStrings',
     CFBundlePackageType: 'BNDL',
+    // Present so Apple validation tooling doesn't warn on a version-less bundle.
+    CFBundleShortVersionString: '1.0',
+    CFBundleVersion: '1',
   };
 }
 

@@ -61,8 +61,14 @@ runs:
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
+        elif [[ "${{ inputs.use-prebuilds }}" == "true" ]]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        elif [[ "${{ inputs.use-prebuilds }}" == "false" ]]; then
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
         else
-          echo "enabled=${{ inputs.use-prebuilds }}" >> "$GITHUB_OUTPUT"
+          # Don't silently treat a typo as 'disabled' — surface it.
+          echo "::warning::Unexpected use-prebuilds value '${{ inputs.use-prebuilds }}' (expected auto/true/false); treating as disabled."
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
         fi
     - name: Download ReactNativeDependencies
       if: ${{ steps.prebuilds.outputs.enabled == 'true' }}

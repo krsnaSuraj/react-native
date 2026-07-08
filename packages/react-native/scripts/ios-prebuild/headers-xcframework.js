@@ -129,45 +129,50 @@ function composeHeadersOnlyXcframework(
   slices /*: Array<StubSlice> */,
 ) /*: string */ {
   const work = fs.mkdtempSync(path.join(outDir, '.stub-work-'));
-  fs.writeFileSync(
-    path.join(work, 'stub.c'),
-    `// ${name} is headers-only; this stub satisfies xcframework tooling.\n` +
-      `static int ${name}Stub __attribute__((unused)) = 0;\n`,
-  );
-  const libs = slices.map(slice => {
-    const sdkPath = execSync(`xcrun --sdk ${slice.sdk} --show-sdk-path`)
-      .toString()
-      .trim();
-    const thins = slice.targets.map((t, i) => {
-      const obj = path.join(work, `stub-${slice.name}-${i}.o`);
-      execSync(
-        `xcrun clang -c -target ${t} -isysroot "${sdkPath}" "${path.join(work, 'stub.c')}" -o "${obj}"`,
-      );
-      const lib = path.join(work, `stub-${slice.name}-${i}.a`);
-      execSync(`xcrun libtool -static -o "${lib}" "${obj}" 2>/dev/null`);
-      return lib;
+  // try/finally so an xcrun/xcodebuild failure mid-compose doesn't leave the
+  // .stub-work-* staging dir behind in outDir.
+  try {
+    fs.writeFileSync(
+      path.join(work, 'stub.c'),
+      `// ${name} is headers-only; this stub satisfies xcframework tooling.\n` +
+        `static int ${name}Stub __attribute__((unused)) = 0;\n`,
+    );
+    const libs = slices.map(slice => {
+      const sdkPath = execSync(`xcrun --sdk ${slice.sdk} --show-sdk-path`)
+        .toString()
+        .trim();
+      const thins = slice.targets.map((t, i) => {
+        const obj = path.join(work, `stub-${slice.name}-${i}.o`);
+        execSync(
+          `xcrun clang -c -target ${t} -isysroot "${sdkPath}" "${path.join(work, 'stub.c')}" -o "${obj}"`,
+        );
+        const lib = path.join(work, `stub-${slice.name}-${i}.a`);
+        execSync(`xcrun libtool -static -o "${lib}" "${obj}" 2>/dev/null`);
+        return lib;
+      });
+      const outLib = path.join(work, `lib${name}-${slice.name}.a`);
+      if (thins.length === 1) {
+        fs.copyFileSync(thins[0], outLib);
+      } else {
+        execSync(
+          `xcrun lipo -create ${thins.map(l => `"${l}"`).join(' ')} -output "${outLib}"`,
+        );
+      }
+      return outLib;
     });
-    const outLib = path.join(work, `lib${name}-${slice.name}.a`);
-    if (thins.length === 1) {
-      fs.copyFileSync(thins[0], outLib);
-    } else {
-      execSync(
-        `xcrun lipo -create ${thins.map(l => `"${l}"`).join(' ')} -output "${outLib}"`,
-      );
-    }
-    return outLib;
-  });
 
-  const outXcfw = path.join(outDir, `${name}.xcframework`);
-  fs.rmSync(outXcfw, {recursive: true, force: true});
-  execSync(
-    `xcodebuild -create-xcframework ` +
-      libs.map(l => `-library "${l}" -headers "${stage}"`).join(' ') +
-      ` -output "${outXcfw}"`,
-    {stdio: 'pipe'},
-  );
-  fs.rmSync(work, {recursive: true, force: true});
-  return outXcfw;
+    const outXcfw = path.join(outDir, `${name}.xcframework`);
+    fs.rmSync(outXcfw, {recursive: true, force: true});
+    execSync(
+      `xcodebuild -create-xcframework ` +
+        libs.map(l => `-library "${l}" -headers "${stage}"`).join(' ') +
+        ` -output "${outXcfw}"`,
+      {stdio: 'pipe'},
+    );
+    return outXcfw;
+  } finally {
+    fs.rmSync(work, {recursive: true, force: true});
+  }
 }
 
 const DEPS_HEADERS_XCFRAMEWORK_NAME = 'ReactNativeDependenciesHeaders';
@@ -211,18 +216,24 @@ function buildDepsHeadersXcframework(
   }
 
   const stage = fs.mkdtempSync(path.join(outDir, '.deps-headers-stage-'));
-  for (const ns of namespaces) {
-    execSync(
-      `/bin/cp -Rc "${path.join(depsHeaders, ns)}" "${path.join(stage, ns)}"`,
+  // try/finally so a cp/compose failure doesn't leave the .deps-headers-stage-*
+  // dir behind in outDir (= third-party/ for the deps path).
+  let outXcfw;
+  try {
+    for (const ns of namespaces) {
+      execSync(
+        `/bin/cp -Rc "${path.join(depsHeaders, ns)}" "${path.join(stage, ns)}"`,
+      );
+    }
+    outXcfw = composeHeadersOnlyXcframework(
+      outDir,
+      DEPS_HEADERS_XCFRAMEWORK_NAME,
+      stage,
+      slices,
     );
+  } finally {
+    fs.rmSync(stage, {recursive: true, force: true});
   }
-  const outXcfw = composeHeadersOnlyXcframework(
-    outDir,
-    DEPS_HEADERS_XCFRAMEWORK_NAME,
-    stage,
-    slices,
-  );
-  fs.rmSync(stage, {recursive: true, force: true});
   console.log(
     `headers-xcframework: ${DEPS_HEADERS_XCFRAMEWORK_NAME}.xcframework ` +
       `(${slices.map(s => s.name).join(', ')}) -> ${outXcfw} ` +

@@ -98,6 +98,14 @@ async function prepareReactNativeDependenciesArtifactsAsync(
   // invisible to binaryTargets). Absent only in pre-sidecar tarballs (pinned
   // RN_DEP_VERSION): CocoaPods still works (the pod flattens the binary's
   // root Headers/), SwiftPM consumers regain it via ensureHeadersLayout.
+  //
+  // Slice coverage: this tarball sidecar carries ALL slices the deps prebuild
+  // produced. The ensureHeadersLayout fallback (headers-compose.js) rebuilds it
+  // from DEFAULT_STUB_SLICES (ios + ios-simulator only) — sufficient for a
+  // SwiftPM iOS build, which is the only supported SPM target today. The two
+  // paths therefore agree on the iOS slices; the fallback simply omits the
+  // extra slices (catalyst/tvos/...) that no SPM consumer needs yet. Headers
+  // are slice-uniform, so a consumer never sees divergent content per slice.
   const headersSidecarSource = path.join(
     path.dirname(xcframeworkSource),
     'ReactNativeDependenciesHeaders.xcframework',

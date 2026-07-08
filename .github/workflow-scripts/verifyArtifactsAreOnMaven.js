@@ -16,9 +16,12 @@ const ARTIFACT_URL =
   'https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/';
 const ARTIFACT_NAME = 'react-native-artifacts-';
 
-// The classifier-suffixed tarballs attached to the react-native-artifacts
-// publication (external-artifacts/build.gradle.kts). The POM check alone
-// would pass even when a classifier artifact never made it to Maven.
+// The primary xcframework classifier tarballs attached to the
+// react-native-artifacts publication (external-artifacts/build.gradle.kts).
+// The 4 dSYM classifiers (core/deps dSYM debug+release) are intentionally
+// excluded — they are debug-symbol sidecars, not consumed at install time.
+// The POM check alone would pass even when a classifier artifact never made
+// it to Maven.
 const ARTIFACT_CLASSIFIERS = [
   'reactnative-core-debug',
   'reactnative-core-release',

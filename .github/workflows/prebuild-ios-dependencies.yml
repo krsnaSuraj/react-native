@@ -130,7 +130,7 @@ jobs:
         with:
           path: |
             packages/react-native/third-party/
-          key: v4-ios-dependencies-xcframework-${{ matrix.flavor }}-${{ hashfiles('scripts/releases/ios-prebuild/configuration.js', 'scripts/releases/ios-prebuild/compose-framework.js') }}
+          key: v5-ios-dependencies-xcframework-${{ matrix.flavor }}-${{ hashfiles('scripts/releases/ios-prebuild/configuration.js', 'scripts/releases/ios-prebuild/compose-framework.js', 'packages/react-native/scripts/ios-prebuild/headers-xcframework.js', 'packages/react-native/scripts/ios-prebuild/headers-spec.js') }}
       # If cache hit, we already have our binary. We don't need to do anything.
       - name: Yarn Install
         if: steps.restore-xcframework.outputs.cache-hit != 'true'
@@ -204,4 +204,4 @@ jobs:
             packages/react-native/third-party/ReactNativeDependencies${{ matrix.flavor }}.xcframework.tar.gz
             packages/react-native/third-party/ReactNativeDependenciesHeaders${{ matrix.flavor }}.xcframework.tar.gz
             packages/react-native/third-party/ReactNativeDependencies${{ matrix.flavor }}.framework.dSYM.tar.gz
-          key: v4-ios-dependencies-xcframework-${{ matrix.flavor }}-${{ hashfiles('scripts/releases/ios-prebuild/configuration.js', 'scripts/releases/ios-prebuild/compose-framework.js') }}
+          key: v5-ios-dependencies-xcframework-${{ matrix.flavor }}-${{ hashfiles('scripts/releases/ios-prebuild/configuration.js', 'scripts/releases/ios-prebuild/compose-framework.js', 'packages/react-native/scripts/ios-prebuild/headers-xcframework.js', 'packages/react-native/scripts/ios-prebuild/headers-spec.js') }}

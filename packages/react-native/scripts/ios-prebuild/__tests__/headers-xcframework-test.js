@@ -10,7 +10,11 @@
 
 'use strict';
 
-const {buildDepsHeadersXcframework} = require('../headers-xcframework');
+const {
+  buildDepsHeadersXcframework,
+  stubSlicesFromXcframework,
+} = require('../headers-xcframework');
+const childProcess = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -55,5 +59,55 @@ describe('buildDepsHeadersXcframework set-equality gate', () => {
     expect(() =>
       buildDepsHeadersXcframework(tmp, headers, ['folly', 'glog'], []),
     ).toThrow(/missing from .*Headers: glog/); // throws for glog, not stray.h
+  });
+});
+
+describe('stubSlicesFromXcframework', () => {
+  // The plist shape is a pure function of plutil's JSON; mock it so the
+  // SupportedPlatform/Variant -> key mapping and the unknown-slice guard can be
+  // tested without a real xcframework or macOS tooling.
+  const mockPlist = (obj /*: mixed */) =>
+    jest
+      .spyOn(childProcess, 'execSync')
+      .mockReturnValue(Buffer.from(JSON.stringify(obj)));
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('maps ios / ios-simulator slices to their stub recipes', () => {
+    mockPlist({
+      AvailableLibraries: [
+        {SupportedPlatform: 'ios', SupportedArchitectures: ['arm64']},
+        {
+          SupportedPlatform: 'ios',
+          SupportedPlatformVariant: 'simulator',
+          SupportedArchitectures: ['arm64', 'x86_64'],
+        },
+      ],
+    });
+    const slices = stubSlicesFromXcframework('/fake.xcframework');
+    expect(slices).toEqual([
+      {name: 'ios', sdk: 'iphoneos', targets: ['arm64-apple-ios15.0']},
+      {
+        name: 'ios-simulator',
+        sdk: 'iphonesimulator',
+        targets: [
+          'arm64-apple-ios15.0-simulator',
+          'x86_64-apple-ios15.0-simulator',
+        ],
+      },
+    ]);
+  });
+
+  test('throws for an unknown slice, pointing at PLATFORM_STUB_RECIPES', () => {
+    mockPlist({
+      AvailableLibraries: [
+        {SupportedPlatform: 'watchos', SupportedArchitectures: ['arm64']},
+      ],
+    });
+    expect(() => stubSlicesFromXcframework('/fake.xcframework')).toThrow(
+      /no stub recipe for slice 'watchos'[\s\S]*PLATFORM_STUB_RECIPES/,
+    );
   });
 });

@@ -123,6 +123,7 @@ const VALID_ACTIONS = new Set([
   'codegen',
   'download',
   'scaffold',
+  'swap-flavor',
 ]);
 
 /*::
@@ -297,7 +298,7 @@ function promptYesNo(
 function resolveAction(
   requestedAction /*: SetupArgs['action'] */,
   appRoot /*: string */,
-) /*: 'add' | 'update' | 'deinit' | 'sync' | 'codegen' | 'download' | 'scaffold' */ {
+) /*: 'add' | 'update' | 'deinit' | 'sync' | 'codegen' | 'download' | 'scaffold' | 'swap-flavor' */ {
   if (requestedAction != null) {
     return requestedAction;
   }
@@ -996,6 +997,28 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     log(`Project root (package.json): ${displayPath(projectRoot)}`);
   }
 
+  // Build-time flavor swap (invoked by the generated build phase). Kept early
+  // and dependency-free — no version resolution, no network — because it runs
+  // on EVERY Xcode build. Reads the Xcode build env for the target flavor +
+  // products dir.
+  if (action === 'swap-flavor') {
+    const {swapFlavorFrameworks} = require('./spm/swap-flavor');
+    try {
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: process.env.CONFIGURATION,
+        builtProductsDir: process.env.BUILT_PRODUCTS_DIR,
+        platformName: process.env.PLATFORM_NAME,
+        isMacCatalyst: process.env.IS_MACCATALYST === 'YES',
+        logger: {log},
+      });
+    } catch (e) {
+      // Non-fatal: a flavor-swap failure must not break the build.
+      logError(`swap-flavor failed: ${e.message}`);
+    }
+    return;
+  }
+
   if (action === 'deinit') {
     const xcodeprojPath =
       args.xcodeprojPath != null
@@ -1189,6 +1212,28 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       logError(`generate-spm-package.js failed: ${e.message}`);
       process.exitCode = 1;
       return;
+    }
+
+    // Pre-fetch the OTHER flavor's slot so the build-time `swap-flavor` phase
+    // can switch debug↔release without touching the network (mirrors CocoaPods
+    // downloading both flavors up front). Best-effort: a Debug-only workflow
+    // still builds if the release slot can't be fetched now — the swap just
+    // logs and leaves the resolved flavor in place. Honors --download skip.
+    if (action === 'add' || action === 'update') {
+      const otherFlavor = args.flavor === 'release' ? 'debug' : 'release';
+      try {
+        const otherArgs = {...args, flavor: otherFlavor};
+        await ensureArtifacts(
+          otherArgs,
+          version,
+          prepareLocalXcframeworkArtifacts(otherArgs, appRoot, version),
+        );
+      } catch (e) {
+        logError(
+          `Could not pre-fetch the ${otherFlavor} flavor for build-time swapping (${e.message}). ` +
+            `A ${otherFlavor}-configuration build will need it — re-run with network, or \`spm download --flavor ${otherFlavor}\`.`,
+        );
+      }
     }
   } else {
     log(`Remote ReactNative package: ${remote.url} @ ${remote.version}`);

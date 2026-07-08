@@ -130,7 +130,7 @@ accepts kebab-case equivalents (e.g. `--skip-codegen`).
 | Option | Description |
 |---|---|
 | `--version <ver>` | RN version (default: from package.json) |
-| `--flavor <debug\|release>` | Artifact flavor (default: debug) |
+| `--flavor <debug\|release>` | Initial artifact flavor to resolve (default: debug). Both flavors are fetched at `add`; the embedded flavor then auto-matches the Xcode build configuration — see below |
 | `--yes` | Skip the dirty-pbxproj confirmation prompt |
 | `--xcodeproj <path>` | [add] Which `.xcodeproj` to inject into (when several exist) |
 | `--productName <name>` | [add] Which app target to inject into (when several exist) |
@@ -138,6 +138,24 @@ accepts kebab-case equivalents (e.g. `--skip-codegen`).
 | `--artifacts <path>` | [advanced] Local artifact source: a `.xcframework` (used directly) or a directory (cache dir to read/download into) |
 | `--download <auto\|skip\|force>` | [advanced] Artifact download policy (default: auto) |
 | `--skipCodegen` | [advanced] Skip the codegen step |
+
+### Debug/Release flavor is automatic
+
+React Native ships **flavored** prebuilt binaries: the *debug* `React.framework`
+(and `hermesvm` / `ReactNativeDependencies`) carry the dev experience — dev menu,
+assertions, `RN_DEBUG_STRING_CONVERTIBLE` — while *release* strips them for
+production. A Debug build must embed the debug binaries and a Release/archive the
+release ones.
+
+SwiftPM `binaryTarget`s can't branch on the build configuration, so — mirroring
+the CocoaPods `React-Core-prebuilt` swap (`replace-rncore-version.js`) — `spm add`
+downloads **both** flavors, and a generated build phase (`react-native spm
+swap-flavor`) overwrites the SwiftPM-copied `React` / `ReactNativeDependencies` /
+`hermesvm` frameworks in `BUILT_PRODUCTS_DIR` with the slice matching
+`$CONFIGURATION`, before Link. It runs on every build, is idempotent, and works
+under both Xcode and `xcodebuild`. No manual step: build Debug → debug binaries,
+build Release/archive → release binaries. (`--flavor` only sets which flavor is
+resolved first; the swap corrects the embedded binaries per build.)
 
 ## What to commit
 

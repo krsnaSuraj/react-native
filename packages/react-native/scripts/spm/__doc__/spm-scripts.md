@@ -272,6 +272,19 @@ workaround keeps your app building.
 > automatically — the error says so. Opt it out via `react-native.config.js`
 > (`platforms.ios = null`) or ask the maintainer for a prebuilt xcframework.
 
+## Framework plugins (Preview)
+
+Frameworks with their own module system (e.g. Expo) contribute to the
+autolinking graph through a **plugin** — a function invoked on every
+regeneration (including the build-time sync) that adds SwiftPM package refs,
+product dependencies, and generated sources. Discovery is transitive
+(installing the framework is enough), and the plugin returns data that RN
+merges idempotently.
+
+See **[spm-autolinking-plugins.md](./spm-autolinking-plugins.md)** for the
+discovery mechanism, the full context/return contract, lifecycle, and failure
+behavior.
+
 ## Removing / resetting
 
 To remove SwiftPM entirely, use `deinit` (the inverse of `add`):

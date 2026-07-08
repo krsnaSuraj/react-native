@@ -187,6 +187,8 @@ async function main(
     appRoot,
     '--react-native-root',
     reactNativeRoot,
+    '--flavor',
+    flavor,
   ]);
 
   if (plan.shouldGeneratePackage) {

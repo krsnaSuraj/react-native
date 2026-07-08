@@ -14,7 +14,11 @@
   AggregatorInput,
   AutolinkedDep,
   AutolinkingArgs,
+  DiscoveredPlugin,
   NpmDepRef,
+  PluginPackageDep,
+  PluginProductDep,
+  ReactDescriptor,
   RawAutolinkingJson,
   SpmModuleConfig,
   SpmTarget,
@@ -51,6 +55,7 @@
  *   - npm packages with their own Package.swift use .package(url: ...) instead of inline targets
  */
 
+const {discoverPlugins, invokePlugins} = require('./autolinking-plugins');
 const {
   defaultReadConfig,
   defaultResolveDep,
@@ -59,6 +64,7 @@ const {
 const {readPodspec} = require('./read-podspec');
 const {
   RemoteVersionError,
+  findProjectRoot,
   makeLogger,
   remotePackageConfig,
   toSwiftName,
@@ -89,14 +95,68 @@ function reactNativePackageDecl(localDecl /*: string */) /*: string */ {
     ? `.package(url: "${remoteCfg.url}", exact: "${remoteCfg.version}")`
     : localDecl;
 }
-function reactProductDeps() /*: string */ {
+// The React product set — single source of truth shared by reactProductDeps()
+// (the emitted string) and the plugin ReactDescriptor. The three ReactNative
+// products come from the RN package (identity varies local vs remote);
+// ReactAppHeaders is in the separate, per-app React-GeneratedCode package
+// (easy to miss when hand-rolling — hence exposing it to plugins).
+function reactProducts() /*: Array<{name: string, package: string}> */ {
   const rn = reactNativePackageLabel();
-  return (
-    `.product(name: "ReactNative", package: "${rn}")` +
-    `, .product(name: "ReactNativeHeaders", package: "${rn}")` +
-    `, .product(name: "ReactNativeDependenciesHeaders", package: "${rn}")` +
-    ', .product(name: "ReactAppHeaders", package: "React-GeneratedCode")'
+  return [
+    {name: 'ReactNative', package: rn},
+    {name: 'ReactNativeHeaders', package: rn},
+    {name: 'ReactNativeDependenciesHeaders', package: rn},
+    {name: 'ReactAppHeaders', package: 'React-GeneratedCode'},
+  ];
+}
+function reactProductDeps() /*: string */ {
+  return reactProducts()
+    .map(p => `.product(name: "${p.name}", package: "${p.package}")`)
+    .join(', ');
+}
+
+// Structured React descriptor handed to autolinking plugins: how to depend on
+// React through one source of truth, so a plugin's own Package.swift doesn't
+// re-derive RN's package path / identity / product names.
+//
+// `packageRef` is local or remote (distinguished by which keys are present):
+//   - local:  {name, path (ABSOLUTE), relPath (relative to outputDir)}
+//   - remote: {name, url, version}
+// The canonical `path` is ABSOLUTE because a plugin may write its manifests in
+// arbitrary subdirs of outputDir, for which an outputDir-relative path would be
+// wrong; the generated manifests are gitignored + regenerated every sync, so an
+// absolute path carries no portability cost. `relPath` is a convenience for the
+// common case. `products` derives from the SAME reactProducts() RN wires into
+// its own autolinked targets (parity: a plugin's target gets exactly RN's React
+// surface), filtered to only products whose package is resolvable this run —
+// the invariant is that any listed product can be depended on without guarding.
+// Returns null when there is no resolvable React dependency.
+function reactDescriptor(
+  absXcframeworks /*: ?string */,
+  xcframeworksRelPath /*: ?string */,
+  codegenPackageExists /*: boolean */,
+) /*: ?ReactDescriptor */ {
+  let packageRef;
+  if (remoteCfg != null) {
+    packageRef = {
+      name: remoteCfg.identity,
+      url: remoteCfg.url,
+      version: remoteCfg.version,
+    };
+  } else if (absXcframeworks != null) {
+    packageRef = {
+      name: 'ReactNative',
+      path: toPosix(absXcframeworks),
+      relPath:
+        xcframeworksRelPath != null ? toPosix(xcframeworksRelPath) : undefined,
+    };
+  } else {
+    return null;
+  }
+  const products = reactProducts().filter(
+    p => p.package !== 'React-GeneratedCode' || codegenPackageExists,
   );
+  return {packageRef, products};
 }
 
 // Normalize a (possibly Windows) path to posix separators for embedding in
@@ -130,6 +190,11 @@ function parseArgs(argv /*: Array<string> */) /*: AutolinkingArgs */ {
       describe:
         'Path to the xcframeworks sub-package (absolute or relative to appRoot)',
     })
+    .option('flavor', {
+      type: 'string',
+      default: 'debug',
+      describe: 'Artifact flavor (debug or release), passed to plugins',
+    })
     .usage(
       'Usage: $0 [options]\n\nGenerates autolinked/Package.swift for SPM autolinking.',
     )
@@ -142,6 +207,7 @@ function parseArgs(argv /*: Array<string> */) /*: AutolinkingArgs */ {
     autolinkingJson: parsed['autolinking-json'] ?? null,
     output: parsed.output ?? null,
     xcframeworksPath: parsed['xcframeworks-path'] ?? null,
+    flavor: parsed.flavor === 'release' ? 'release' : 'debug',
   };
 }
 
@@ -189,6 +255,25 @@ function readSpmModulesFromConfig(
     return config.spm?.modules ?? [];
   } catch (e) {
     // Config might use Ruby interop or other patterns – skip
+    return [];
+  }
+}
+
+/**
+ * Reads the app's `spm.denyPlugins` — npm names of autolinking plugins to
+ * skip. The escape hatch for the transitive plugin discovery (an app opts a
+ * framework's plugin OUT); no allowlist is required.
+ */
+function readDenyPluginsFromConfig(appRoot /*: string */) /*: Array<string> */ {
+  const configPath = path.join(appRoot, 'react-native.config.js');
+  if (!fs.existsSync(configPath)) {
+    return [];
+  }
+  try {
+    // $FlowFixMe[unsupported-syntax] dynamic require by computed path
+    const config = require(configPath);
+    return config.spm?.denyPlugins ?? [];
+  } catch (e) {
     return [];
   }
 }
@@ -776,6 +861,11 @@ function generateAutolinkedPackageSwift(
   const hasReactDep /*: boolean */ = input.hasReactDep !== false;
   // Relative path from autolinked/ to build/xcframeworks/, e.g. "../build/xcframeworks".
   const xcframeworksRelPath /*: ?string */ = input.xcframeworksRelPath;
+  // Autolinking-plugin contributions (Expo & other frameworks).
+  const pluginPackageDeps /*: ReadonlyArray<PluginPackageDep> */ =
+    input.pluginPackageDeps ?? [];
+  const pluginProductDeps /*: ReadonlyArray<PluginProductDep> */ =
+    input.pluginProductDeps ?? [];
 
   // Package-level dependencies: one .package(path:) per autolinked dep,
   // plus ReactNative if any inline target needs to import React headers.
@@ -783,6 +873,14 @@ function generateAutolinkedPackageSwift(
     const pkgPath = d.packagePath ?? `packages/${d.swiftName}`;
     return `.package(name: "${d.swiftName}", path: "${pkgPath}")`;
   });
+  // Framework plugin packages: local (path) or remote (url + exact version).
+  for (const p of pluginPackageDeps) {
+    packageDeps.push(
+      p.path != null
+        ? `.package(name: "${p.name}", path: "${p.path}")`
+        : `.package(url: "${p.url ?? ''}", exact: "${p.version ?? ''}")`,
+    );
+  }
   if (
     inlineTargets.length > 0 &&
     hasReactDep &&
@@ -805,6 +903,9 @@ function generateAutolinkedPackageSwift(
       d => `.product(name: "${d.swiftName}", package: "${d.swiftName}")`,
     ),
     ...inlineTargets.map(t => `.target(name: "${t.name}")`),
+    ...pluginProductDeps.map(
+      p => `.product(name: "${p.name}", package: "${p.package}")`,
+    ),
   ];
 
   const inlineDecls = inlineTargets.map(t => {
@@ -1108,6 +1209,9 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
 
   // Collect all targets along with their routing metadata.
   const entries /*: Array<TargetEntry> */ = [];
+  // Autolinking plugins discovered from deps' react-native.config.js
+  // (populated during the dep walk below; invoked before the aggregator write).
+  let discoveredPlugins /*: Array<DiscoveredPlugin> */ = [];
 
   // 1. From autolinking.json (npm packages with iOS native modules), expanded
   //    with transitive deps declared via `spm.dependencies` in each package's
@@ -1145,7 +1249,37 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       }
     }
 
+    // Discover framework autolinking plugins (Expo & others) from the same
+    // dep set — invoked before the aggregator is written (below).
+    discoveredPlugins = discoverPlugins(
+      allDeps,
+      defaultReadConfig,
+      readDenyPluginsFromConfig(appRoot),
+    );
+    for (const p of discoveredPlugins) {
+      log(`Found SPM autolinking plugin: ${p.depName}`);
+    }
+
+    // A dep that declares an autolinking plugin OWNS its native contribution:
+    // the plugin (invoked below) returns its package/product/generated-source
+    // deps. RN must not also try to source-build that package through the
+    // community-lib path — it typically has no Package.swift and may be mixed
+    // Swift/ObjC (e.g. expo → ExpoModulesCore), which would throw before the
+    // plugin ever runs. Mirrors CocoaPods: `use_expo_modules!` owns Expo's
+    // pods; podspec autolinking doesn't also build Expo as a community lib.
+    // Skipping here also keeps the dep out of `entries` → out of the
+    // missing-manifest scan and the aggregator's package refs.
+    const pluginHostDeps /*: Set<string> */ = new Set(
+      discoveredPlugins.map(p => p.depName),
+    );
+
     for (const dep of allDeps) {
+      if (pluginHostDeps.has(dep.name)) {
+        log(
+          `Skipping ${dep.name} target generation — provided by its SPM autolinking plugin`,
+        );
+        continue;
+      }
       const target = autolinkingDepToSpmTarget(
         dep.name,
         dep,
@@ -1512,6 +1646,53 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     }
   }
 
+  // Invoke discovered framework plugins now that the RN dep graph + autolinking
+  // data are final. Their package/product contributions merge into the
+  // aggregator below; this runs in add/update AND every build-time sync (both
+  // call main), so a plugin's contribution survives every regeneration.
+  let pluginPackageDeps /*: Array<PluginPackageDep> */ = [];
+  let pluginProductDeps /*: Array<PluginProductDep> */ = [];
+  let pluginGeneratedSources /*: Array<{path: string}> */ = [];
+  if (discoveredPlugins.length > 0) {
+    // React-GeneratedCode is the per-app codegen package (referenced as
+    // `../ios` from outputDir). It may be absent (no codegen this run), so the
+    // descriptor only lists its products when it actually resolves.
+    const codegenPackageExists = fs.existsSync(
+      path.join(outputDir, '..', 'ios', 'Package.swift'),
+    );
+    const result = invokePlugins(discoveredPlugins, {
+      appRoot,
+      projectRoot: findProjectRoot(appRoot),
+      reactNativeRoot: rnRoot,
+      autolinking: autolinkingData ?? {},
+      outputDir,
+      flavor: args.flavor,
+      react: reactDescriptor(
+        absXcframeworks,
+        xcframeworksRelPath,
+        codegenPackageExists,
+      ),
+    });
+    pluginPackageDeps = result.packageDependencies;
+    pluginProductDeps = result.productDependencies;
+    pluginGeneratedSources = result.generatedSources;
+    log(
+      `SPM plugins contributed ${pluginPackageDeps.length} package(s), ` +
+        `${pluginProductDeps.length} product(s), ` +
+        `${pluginGeneratedSources.length} generated source(s)`,
+    );
+    // Generated-source registration (e.g. Expo's ExpoModulesProvider.swift) is
+    // consumed by the codegen step via this manifest — the provider ordering
+    // contract is still Preview and co-designed with the first consumer.
+    if (pluginGeneratedSources.length > 0) {
+      fs.writeFileSync(
+        path.join(outputDir, '.spm-plugin-generated-sources.json'),
+        JSON.stringify(pluginGeneratedSources, null, 2) + '\n',
+        'utf8',
+      );
+    }
+  }
+
   // Top-level aggregator: references every entry as .package(path:) and
   // depends on each via .product(...). No more inline targets — every
   // autolinked dep is a real SPM package in its own source dir.
@@ -1519,6 +1700,8 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     npmDeps: aggregatorPackageDeps,
     hasReactDep,
     xcframeworksRelPath,
+    pluginPackageDeps,
+    pluginProductDeps,
   });
   fs.mkdirSync(outputDir, {recursive: true});
   const outputPath = path.join(outputDir, 'Package.swift');
@@ -1621,6 +1804,7 @@ module.exports = {
   main,
   generateAutolinkedPackageSwift,
   generateSynthPackageSwift,
+  reactDescriptor,
   linkHeaderTree,
   collectSpmSources,
   expandSpmSourceGlobs,

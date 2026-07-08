@@ -21,11 +21,60 @@ const {
   hasMixedLanguageSources,
   hasPodspec,
   linkHeaderTree,
+  reactDescriptor,
   reportMissingManifests,
 } = require('../generate-spm-autolinking');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+// ---------------------------------------------------------------------------
+// reactDescriptor — the ReactDescriptor handed to autolinking plugins
+// ---------------------------------------------------------------------------
+
+describe('reactDescriptor (plugin context.react)', () => {
+  it('builds a local package ref (absolute path + relPath) and the full product set when codegen exists', () => {
+    const d = reactDescriptor(
+      '/abs/app/build/xcframeworks',
+      '../xcframeworks',
+      true,
+    );
+    expect(d.packageRef).toEqual({
+      name: 'ReactNative',
+      path: '/abs/app/build/xcframeworks',
+      relPath: '../xcframeworks',
+    });
+    // Full product set, incl. ReactAppHeaders in the SEPARATE React-GeneratedCode
+    // package (the entry a hand-rolled plugin would miss).
+    expect(d.products).toEqual([
+      {name: 'ReactNative', package: 'ReactNative'},
+      {name: 'ReactNativeHeaders', package: 'ReactNative'},
+      {name: 'ReactNativeDependenciesHeaders', package: 'ReactNative'},
+      {name: 'ReactAppHeaders', package: 'React-GeneratedCode'},
+    ]);
+  });
+
+  it('omits React-GeneratedCode products when the codegen package is absent', () => {
+    const d = reactDescriptor(
+      '/abs/app/build/xcframeworks',
+      '../xcframeworks',
+      false,
+    );
+    expect(d.products).toEqual([
+      {name: 'ReactNative', package: 'ReactNative'},
+      {name: 'ReactNativeHeaders', package: 'ReactNative'},
+      {name: 'ReactNativeDependenciesHeaders', package: 'ReactNative'},
+    ]);
+    // Invariant: no listed product references a package that isn't resolvable.
+    expect(d.products.some(p => p.package === 'React-GeneratedCode')).toBe(
+      false,
+    );
+  });
+
+  it('returns null when there is no resolvable React dependency', () => {
+    expect(reactDescriptor(null, null, false)).toBeNull();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // generateAutolinkedPackageSwift — top-level aggregator
@@ -56,6 +105,27 @@ describe('generateAutolinkedPackageSwift (aggregator)', () => {
     expect(result).toContain('.package(name: "B", path: "packages/B")');
     expect(result).toContain('.product(name: "A", package: "A")');
     expect(result).toContain('.product(name: "B", package: "B")');
+  });
+
+  it('emits autolinking-plugin package + product contributions (path and remote)', () => {
+    const result = generateAutolinkedPackageSwift({
+      pluginPackageDeps: [
+        {name: 'ExpoModulesCore', path: '../../../../node_modules/expo'},
+        {name: 'ReactNative', url: 'https://example/rn.git', version: '0.87.0'},
+      ],
+      pluginProductDeps: [
+        {name: 'ExpoModulesCore', package: 'ExpoModulesCore'},
+      ],
+    });
+    expect(result).toContain(
+      '.package(name: "ExpoModulesCore", path: "../../../../node_modules/expo")',
+    );
+    expect(result).toContain(
+      '.package(url: "https://example/rn.git", exact: "0.87.0")',
+    );
+    expect(result).toContain(
+      '.product(name: "ExpoModulesCore", package: "ExpoModulesCore")',
+    );
   });
 
   it('emits an eval-time missing-manifest guard naming each lib by npm name', () => {

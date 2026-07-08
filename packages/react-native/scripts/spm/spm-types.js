@@ -64,6 +64,9 @@ export type AutolinkingArgs = {
   autolinkingJson: string | null,
   output: string | null,
   xcframeworksPath: string | null,
+  // Artifact flavor, threaded into the plugin context (frameworks pick their
+  // per-flavor precompiled xcframework slice). Defaults to 'debug'.
+  flavor: 'debug' | 'release',
 };
 
 export type SpmTarget = {
@@ -189,6 +192,79 @@ export type AggregatorInput = {
   // Relative path from the aggregator's dir (autolinking/) to
   // build/xcframeworks. Used for the inline-target ReactNative dep.
   xcframeworksRelPath?: ?string,
+  // Autolinking-plugin contributions (Expo & other frameworks). Merged into
+  // the aggregator's package deps + the AutolinkedAggregate target deps.
+  pluginPackageDeps?: ReadonlyArray<PluginPackageDep>,
+  pluginProductDeps?: ReadonlyArray<PluginProductDep>,
+};
+
+// --- Autolinking plugins (PREVIEW / unstable contract) ---
+
+// A framework's plugin package dependency: local (path) or remote (url+version).
+export type PluginPackageDep = {
+  name: string,
+  path?: string,
+  url?: string,
+  version?: string,
+};
+
+// A product the AutolinkedAggregate target should link.
+export type PluginProductDep = {name: string, package: string};
+
+// A generated source file (e.g. Expo's ExpoModulesProvider.swift) to register
+// in the codegen package so it compiles.
+export type PluginGeneratedSource = {path: string};
+
+// How a plugin depends on React — the single source of truth so a plugin's
+// own Package.swift doesn't re-derive RN's package path/identity/products.
+// Local vs remote is distinguished by which keys are present:
+//   - local:  {name, path (absolute), relPath (relative to outputDir)}
+//   - remote: {name, url, version}
+// `path` is absolute so it's correct no matter which subdir of outputDir the
+// plugin writes its manifest into (the manifests are gitignored + regenerated).
+export type ReactPackageRef =
+  | {name: string, path: string, relPath?: string}
+  | {name: string, url: string, version: string};
+
+export type ReactDescriptor = {
+  packageRef: ReactPackageRef,
+  // The products a React-consuming target may depend on — the same set RN wires
+  // into its own autolinked targets (parity), filtered to those resolvable this
+  // run. Every listed product is safe to reference without guarding. Note
+  // ReactAppHeaders lives in the separate, per-app React-GeneratedCode package.
+  products: Array<{name: string, package: string}>,
+};
+
+// Context handed to every plugin. Includes the JS root (projectRoot) and the
+// parsed autolinking data so a framework can scan the discovered deps.
+export type PluginContext = {
+  appRoot: string,
+  projectRoot: string,
+  reactNativeRoot: string,
+  autolinking: {readonly [string]: unknown},
+  outputDir: string,
+  flavor: 'debug' | 'release',
+  // How to depend on React (package ref + product set); null only when there is
+  // no resolvable React dependency at all.
+  react: ?ReactDescriptor,
+};
+
+export type PluginResult = {
+  packageDependencies: Array<PluginPackageDep>,
+  productDependencies: Array<PluginProductDep>,
+  generatedSources: Array<PluginGeneratedSource>,
+};
+
+export type SpmAutolinkingPlugin = (context: PluginContext) => ?{
+  packageDependencies?: Array<PluginPackageDep>,
+  productDependencies?: Array<PluginProductDep>,
+  generatedSources?: Array<PluginGeneratedSource>,
+};
+
+export type DiscoveredPlugin = {
+  depName: string,
+  pluginPath: string,
+  plugin: SpmAutolinkingPlugin,
 };
 
 export type SynthPackageSpec = {

@@ -1132,6 +1132,8 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       appRoot,
       '--react-native-root',
       reactNativeRoot,
+      '--flavor',
+      args.flavor,
     ]);
   } catch (e) {
     if (e instanceof MissingManifestError) {

@@ -483,10 +483,13 @@ function buildPerAppHeaderTree(
   logger /*: {log: (msg: string) => void} */ = {log() {}},
 ) /*: HeaderTreeResult */ {
   const outDir = perAppHeadersDir(appRoot);
-  // Build into a temp sibling, then swap: the farm now lives INSIDE
-  // build/generated/ios (one of the trees being folded), so building in place
-  // would make foldDir walk the half-built farm itself.
-  const tmpDir = outDir + '.tmp';
+  // Build into a temp dir OUTSIDE every folded root, then swap into place. The
+  // farm's final home (outDir) is INSIDE build/generated/ios — a tree foldDir
+  // walks — so `outDir + '.tmp'` would ALSO sit there and foldDir would fold
+  // the half-built farm back into itself (a spurious `ReactAppHeaders.tmp/`
+  // namespace duplicating every codegen header). build/.react-app-headers.tmp
+  // is under build/ but not under any folded subdir.
+  const tmpDir = path.join(appRoot, 'build', '.react-app-headers.tmp');
   fs.rmSync(tmpDir, {recursive: true, force: true});
   fs.rmSync(outDir, {recursive: true, force: true});
   fs.mkdirSync(tmpDir, {recursive: true});
@@ -508,6 +511,7 @@ function buildPerAppHeaderTree(
       '// satisfies SPM, which requires at least one source file per target.\n' +
       'static int ReactAppHeadersStub __attribute__((unused)) = 0;\n',
   );
+  fs.mkdirSync(path.dirname(outDir), {recursive: true});
   fs.renameSync(tmpDir, outDir);
 
   logger.log(

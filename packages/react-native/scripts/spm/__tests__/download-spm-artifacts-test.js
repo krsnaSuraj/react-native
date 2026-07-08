@@ -527,6 +527,29 @@ describe('resolveRNDepsArtifact', () => {
     expect(result.url).toContain('react-native-artifacts/0.84.2/');
   });
 
+  it('uses a local deps tarball override when the file exists', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-deps-local-'));
+    try {
+      const tarball = path.join(dir, 'deps.tar.gz');
+      fs.writeFileSync(tarball, 'x');
+      const result = await resolveRNDepsArtifact('0.85.0', 'debug', tarball);
+      expect(result.url).toBe(tarball);
+      expect(result.version).toBe('0.85.0-local');
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true});
+    }
+  });
+
+  it('throws when the local deps tarball override is missing', async () => {
+    await expect(
+      resolveRNDepsArtifact(
+        '0.85.0',
+        'debug',
+        path.join(os.tmpdir(), 'spm-deps-nope', 'nope.tar.gz'),
+      ),
+    ).rejects.toThrow(/does not exist/);
+  });
+
   it('resolves RN_DEP_VERSION=nightly via the npm registry', async () => {
     process.env.RN_DEP_VERSION = 'nightly';
     globalThis.fetch = routerFetch({

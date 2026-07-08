@@ -307,6 +307,38 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       );
     }
 
+    // Guard against a stale/wrong React.xcframework layout. The modular
+    // framework (post-#57285) ships a FLAT Headers/ with React-umbrella.h and
+    // NO nested Headers/React_Core/. An older/experimental artifact carrying the
+    // React_Core-per-pod nesting would otherwise fail deep inside the consumer's
+    // Clang module build with a cryptic "'React/RCTDefines.h' file not found" —
+    // surface it here with an actionable message instead.
+    const reactXcfw = raw.React?.xcframeworkPath;
+    if (reactXcfw != null && fs.existsSync(reactXcfw)) {
+      const frameworkSlice = fs
+        .readdirSync(reactXcfw)
+        .map(d => path.join(reactXcfw, d, 'React.framework'))
+        .find(f => fs.existsSync(f));
+      if (frameworkSlice != null) {
+        const headersDir = path.join(frameworkSlice, 'Headers');
+        const hasUmbrella = fs.existsSync(
+          path.join(headersDir, 'React-umbrella.h'),
+        );
+        const hasReactCoreNesting = fs.existsSync(
+          path.join(headersDir, 'React_Core'),
+        );
+        if (!hasUmbrella || hasReactCoreNesting) {
+          throw new Error(
+            'React.xcframework has an unexpected header layout (missing ' +
+              'Headers/React-umbrella.h and/or a stale nested Headers/React_Core/). ' +
+              'This is a pre-#57285 or experimental artifact; a SwiftPM consumer ' +
+              'cannot build the `React` Clang module from it. Use a post-#57285 ' +
+              'React.xcframework (current nightly/release or a fresh ios-prebuild build).',
+          );
+        }
+      }
+    }
+
     const names /*: Array<string> */ = [];
     const linkOne = (name /*: string */, target /*: string */) => {
       const linkPath = path.join(xcfwLinksDir, `${name}.xcframework`);

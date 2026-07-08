@@ -125,18 +125,33 @@ function runPodIpcSpec(podspecPath /*: string */) /*: RawSpec | null */ {
     return null;
   }
   // Some podspecs print diagnostics to stdout during evaluation (e.g. skia:
-  // `-- SK_GRAPHITE: OFF ...`) before `pod ipc` emits the JSON. Parsing the
-  // raw stdout then throws and we'd silently fall back to the (much weaker)
-  // regex parser. Extract just the JSON object (first `{` … last `}`).
+  // `-- SK_GRAPHITE: OFF ...`) before `pod ipc` emits the JSON, and a
+  // diagnostic can itself contain braces (`Building {module}`). `pod ipc`
+  // pretty-prints the spec as a JSON object whose outermost braces sit at
+  // column 0, so ANCHOR on a line-boundary `{`…`}` rather than the first/last
+  // brace anywhere — otherwise a brace inside a diagnostic shifts the slice and
+  // JSON.parse throws. When the authoritative parse is abandoned we log (not
+  // silently drop to the much weaker, subspec-blind regex parser).
   const stdout = result.stdout;
-  const start = stdout.indexOf('{');
-  const end = stdout.lastIndexOf('}');
+  const startMatch = stdout.match(/^\{/m);
+  const start = startMatch != null ? startMatch.index : -1;
+  const lastLineBrace = stdout.lastIndexOf('\n}');
+  const end =
+    lastLineBrace >= 0 ? lastLineBrace + 2 : stdout.lastIndexOf('}') + 1;
   if (start < 0 || end <= start) {
+    console.warn(
+      '[read-podspec] pod ipc spec produced no line-anchored JSON object; ' +
+        'falling back to the regex parser (subspecs/helpers may be missed).',
+    );
     return null;
   }
   try {
-    return JSON.parse(stdout.slice(start, end + 1));
-  } catch {
+    return JSON.parse(stdout.slice(start, end));
+  } catch (e) {
+    console.warn(
+      `[read-podspec] pod ipc spec JSON parse failed (${e.message}); ` +
+        'falling back to the regex parser (subspecs/helpers may be missed).',
+    );
     return null;
   }
 }

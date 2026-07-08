@@ -384,7 +384,11 @@ function hasPodspec(absSource /*: string */) /*: boolean */ {
   for (const sub of ['', 'ios']) {
     const dir = sub === '' ? absSource : path.join(absSource, sub);
     try {
-      if (fs.readdirSync(dir).some(e => e.endsWith('.podspec'))) {
+      if (
+        fs
+          .readdirSync(dir)
+          .some(e => e.endsWith('.podspec') && !e.startsWith('.spm-scaffold-'))
+      ) {
         return true;
       }
     } catch {
@@ -746,7 +750,10 @@ function extractPodspecHeaderSearchPaths(
   let podspecPath /*: ?string */ = null;
   try {
     const entries = fs.readdirSync(sourceDir);
-    const candidate = entries.find(e => e.endsWith('.podspec'));
+    // Skip a crashed run's leftover `.spm-scaffold-<pid>-<name>.podspec` copy.
+    const candidate = entries.find(
+      e => e.endsWith('.podspec') && !e.startsWith('.spm-scaffold-'),
+    );
     if (candidate != null) {
       podspecPath = path.join(sourceDir, candidate);
     }
@@ -1437,7 +1444,19 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       continue;
     }
     // spmModule: synth wrapper is the legitimate mechanism (no podspec exists
-    // to scaffold from, and the app developer declared it explicitly).
+    // to scaffold from, and the app developer declared it explicitly). But a
+    // mixed-language module can't be wrapped either — SPM can't compile Swift +
+    // C-family sources in one target, and a synth wrapper would fail with a
+    // cryptic SPM resolve error. Surface the same friendly diagnostic the
+    // community-dep path uses instead of letting SPM emit the cryptic one.
+    if (hasMixedLanguageSources(absSource)) {
+      throw new Error(
+        `react-native autolinking: the spm.module "${target.name}" mixes Swift ` +
+          `and C-family (.m/.mm/.c/.cpp) sources, which SwiftPM cannot compile ` +
+          `in a single target. Split it into separate single-language modules, ` +
+          `or ship a hand-written Package.swift with multiple targets.`,
+      );
+    }
     const wrapperDir = path.join(packagesDir, target.name);
     wrapperDirs.set(target.name, wrapperDir);
     fs.mkdirSync(wrapperDir, {recursive: true});

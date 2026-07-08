@@ -385,7 +385,18 @@ function addArrayStringValues(
 
   const field = findField(text, obj, key);
   if (field != null) {
-    const fresh = values.filter(v => !field.value.includes(v));
+    // Dedup by EXACT existing member, not substring — a substring check would
+    // treat `"-ObjC"` as already present when only `"-ObjCFoo"` is there (and
+    // vice-versa). Parse the current members (array `( … )` or bare scalar).
+    const existingMembers = new Set(
+      field.value
+        .replace(/^\s*\(/, '')
+        .replace(/\)\s*$/, '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0),
+    );
+    const fresh = values.filter(v => !existingMembers.has(v));
     if (fresh.length === 0) {
       return text;
     }

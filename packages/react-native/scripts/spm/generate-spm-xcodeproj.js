@@ -382,8 +382,11 @@ fi
 
 cd "$SRCROOT"
 if command -v npx >/dev/null 2>&1; then
-  npx react-native spm sync
-  RC=$?
+  # \`|| RC=$?\` so a non-zero exit is CAPTURED rather than aborting the phase
+  # under \`set -e\` — the whole point is to branch on the code below (2 = fail
+  # the build with a scaffold hint; other non-zero = warn but don't break).
+  RC=0
+  npx react-native spm sync || RC=$?
   if [ "$RC" -eq 2 ]; then
     # Exit 2 = an autolinked community dependency has no Package.swift. The
     # autolinker already printed an \`error:\` line per dep (so Xcode shows them

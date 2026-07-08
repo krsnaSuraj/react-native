@@ -683,10 +683,12 @@ function emitScaffoldedPackageSwift(
     );
   }
 
-  // sources: emit only when podspec declared them. If empty, SPM auto-scans
-  // the target dir — which for `path: "."` means the entire dep root. We
-  // exclude common non-source files via the `exclude:` list to keep that
-  // tractable.
+  // sources: emit only when the podspec declared them. If empty (regex-fallback
+  // podspec), no `sources:`/`exclude:` is emitted and SPM auto-scans the target
+  // dir — which for `path: "."` is the entire dep root. That is a known
+  // limitation of the regex-fallback path (the pod-ipc parse yields explicit
+  // sources); a future improvement could emit an `exclude:` list for the dep's
+  // example/test/build dirs.
   const sourcesLine =
     spec.sources.length > 0
       ? `\n            sources: [\n${spec.sources.map(s => `                "${s}",`).join('\n')}\n            ],`
@@ -890,7 +892,11 @@ function scaffoldPackageSwiftForDep(
   if (podspecPath == null) {
     try {
       const entries = fs.readdirSync(dep.root);
-      const candidate = entries.find(e => e.endsWith('.podspec'));
+      // Skip a crashed run's leftover patched copy (read-podspec.js stages it
+      // as `.spm-scaffold-<pid>-<name>.podspec` next to the original).
+      const candidate = entries.find(
+        e => e.endsWith('.podspec') && !e.startsWith('.spm-scaffold-'),
+      );
       if (candidate != null) {
         podspecPath = path.join(dep.root, candidate);
       }
@@ -1133,7 +1139,7 @@ function scaffoldAll(
       // package.
       try {
         for (const f of fs.readdirSync(dep.root)) {
-          if (f.endsWith('.podspec')) {
+          if (f.endsWith('.podspec') && !f.startsWith('.spm-scaffold-')) {
             podToNpm.set(path.basename(f, '.podspec'), dep.name);
           }
         }

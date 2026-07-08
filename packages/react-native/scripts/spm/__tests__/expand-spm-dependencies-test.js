@@ -326,6 +326,24 @@ describe('expandSpmDependencies', () => {
     ).toThrow(/ReactNativeWorklets/);
   });
 
+  it('throws on a CASE-INSENSITIVE swiftName collision (worklets vs Worklets)', () => {
+    // Distinct as exact strings, but collide as directories on the default
+    // case-insensitive macOS filesystem.
+    const direct = [
+      {name: 'react-native-worklets', root: '/w', platforms: {ios: {}}},
+      {name: 'other-worklets', root: '/o', platforms: {ios: {}}},
+    ];
+    expect(() =>
+      expandSpmDependencies(direct, {
+        readConfig: makeReadConfig({
+          '/w': {spm: {name: 'worklets'}},
+          '/o': {spm: {name: 'Worklets'}},
+        }),
+        resolveDep: makeResolveDep({}),
+      }),
+    ).toThrow(/case/i);
+  });
+
   it('rejects empty-string spm.name with a clear error citing the npm name', () => {
     const direct = [{name: 'a', root: '/a', platforms: {ios: {}}}];
     expect(() =>

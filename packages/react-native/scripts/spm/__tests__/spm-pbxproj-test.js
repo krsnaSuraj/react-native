@@ -192,6 +192,36 @@ describe('addArrayStringValues', () => {
     expect(out).toContain('"-lz"');
     expect(out).toContain('"-ObjC"');
   });
+
+  it('dedups by EXACT token, not substring (adds "-ObjC" even when "-ObjCFoo" is present)', () => {
+    const withArray = PLAIN_PBXPROJ.replace(
+      'PRODUCT_NAME = "$(TARGET_NAME)";',
+      'OTHER_LDFLAGS = ("-ObjCFoo", ); PRODUCT_NAME = "$(TARGET_NAME)";',
+    );
+    const out = addArrayStringValues(
+      withArray,
+      targetDebugDict(withArray),
+      'OTHER_LDFLAGS',
+      ['"-ObjC"'],
+    );
+    // A substring check would have seen "-ObjC" inside "-ObjCFoo" and skipped it.
+    expect(out).toContain('"-ObjC"');
+    expect(out).toContain('"-ObjCFoo"');
+  });
+
+  it('does not re-add an exact existing member', () => {
+    const withArray = PLAIN_PBXPROJ.replace(
+      'PRODUCT_NAME = "$(TARGET_NAME)";',
+      'OTHER_LDFLAGS = ("-ObjC", ); PRODUCT_NAME = "$(TARGET_NAME)";',
+    );
+    const out = addArrayStringValues(
+      withArray,
+      targetDebugDict(withArray),
+      'OTHER_LDFLAGS',
+      ['"-ObjC"'],
+    );
+    expect((out.match(/"-ObjC"/g) || []).length).toBe(1);
+  });
 });
 
 describe('ensureScalarField', () => {

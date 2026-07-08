@@ -602,6 +602,20 @@ describe('per-app header farm (ReactAppHeaders SPM target)', () => {
     const second = buildPerAppHeaderTree(appRoot);
     // No nested ReactAppHeaders/ReactAppHeaders self-fold artifacts.
     expect(fs.existsSync(path.join(perAppDir, 'ReactAppHeaders'))).toBe(false);
+    // ...and no ReactAppHeaders.tmp/ either: the temp build dir must NOT live
+    // under a folded root (build/generated/ios), else foldDir walks the
+    // half-built farm and creates a spurious `ReactAppHeaders.tmp/` namespace
+    // duplicating every codegen header.
+    expect(fs.existsSync(path.join(perAppDir, 'ReactAppHeaders.tmp'))).toBe(
+      false,
+    );
+    expect(
+      [...second.virtualPaths].some(p => p.includes('ReactAppHeaders.tmp')),
+    ).toBe(false);
+    // The out-of-tree temp is consumed (renamed into place), not left behind.
+    expect(
+      fs.existsSync(path.join(appRoot, 'build', '.react-app-headers.tmp')),
+    ).toBe(false);
     expect(second.virtualPaths.has('MyLib/Provider.h')).toBe(true);
   });
 });

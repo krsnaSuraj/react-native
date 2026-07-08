@@ -96,6 +96,11 @@ function parseArgs(argv /*: Array<string> */) /*: DownloadArgs */ {
       describe:
         'Local ReactNativeHeaders tarball to use instead of downloading. Env fallback: RN_HEADERS_TARBALL_PATH.',
     })
+    .option('deps-tarball', {
+      type: 'string',
+      describe:
+        'Local ReactNativeDependencies tarball to use instead of downloading (e.g. the deps prebuild output). Carries the headers sidecar beside the binary, so this subsumes --deps-headers-tarball for a local build. Env fallback: RN_DEPS_TARBALL_PATH.',
+    })
     .option('deps-headers-tarball', {
       type: 'string',
       describe:
@@ -115,6 +120,8 @@ function parseArgs(argv /*: Array<string> */) /*: DownloadArgs */ {
       parsed['core-tarball'] ?? process.env.RN_CORE_TARBALL_PATH ?? null,
     headersTarball:
       parsed['headers-tarball'] ?? process.env.RN_HEADERS_TARBALL_PATH ?? null,
+    depsTarball:
+      parsed['deps-tarball'] ?? process.env.RN_DEPS_TARBALL_PATH ?? null,
     depsHeadersTarball:
       parsed['deps-headers-tarball'] ??
       process.env.RN_DEPS_HEADERS_TARBALL_PATH ??
@@ -241,9 +248,22 @@ async function resolveNightlyVersion(
   if (!res.ok) {
     throw new Error(`npm lookup failed for ${npmPackage}: ${res.status}`);
   }
-  const ver = (await res.json()).version;
+  const ver = (await res.json())?.version;
+  assertSafeVersion(ver, `${npmPackage}/nightly`);
   log(`  Resolved nightly: ${ver}`);
   return ver;
+}
+
+// A version string flows into Maven URLs and local tarball filenames (which are
+// then passed to tar/cp via execFileSync). Constrain it to a safe charset so a
+// malformed/hostile registry response can't produce a surprising path or a
+// confusing 404 — and so static analysis sees an explicit sanitizer.
+function assertSafeVersion(ver /*: mixed */, source /*: string */) /*: void */ {
+  if (typeof ver !== 'string' || !/^[A-Za-z0-9._-]+$/.test(ver)) {
+    throw new Error(
+      `npm response for ${source} has no usable "version" field (got: ${String(ver)})`,
+    );
+  }
 }
 
 /**
@@ -281,7 +301,8 @@ async function resolveLatestV1Version() /*: Promise<string> */ {
   if (!res.ok) {
     throw new Error(`npm lookup failed: ${res.status}`);
   }
-  const ver = (await res.json()).version;
+  const ver = (await res.json())?.version;
+  assertSafeVersion(ver, 'hermes-compiler/latest-v1');
   log(`  Resolved latest-v1: ${ver}`);
   return ver;
 }
@@ -338,7 +359,23 @@ async function resolveRNCoreArtifact(
 async function resolveRNDepsArtifact(
   rnVersion /*: string */,
   flavor /*: string */,
+  localTarball /*: ?string */,
 ) /*: Promise<ResolvedArtifact> */ {
+  // Local-tarball override (--deps-tarball / RN_DEPS_TARBALL_PATH): use a
+  // locally built deps tarball (the deps prebuild output) instead of
+  // downloading. It carries ReactNativeDependenciesHeaders.xcframework beside
+  // the binary, so the existing companion-staging path (COMPANION_XCFRAMEWORKS
+  // 'rndeps' -> ReactNativeDependenciesHeaders) supplies the sidecar too — no
+  // separate --deps-headers-tarball needed for a local build.
+  if (localTarball != null && localTarball !== '') {
+    if (!fs.existsSync(localTarball)) {
+      throw new Error(
+        `deps tarball override is set to ${localTarball} but the file does not exist`,
+      );
+    }
+    log(`  Using LOCAL deps tarball: ${localTarball}`);
+    return {url: localTarball, version: `${rnVersion}-local`};
+  }
   let version = process.env.RN_DEP_VERSION ?? rnVersion;
   if (version === 'nightly') {
     version = await resolveNightlyVersion('react-native');
@@ -1066,9 +1103,15 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     {
       label: 'rndeps',
       name: 'ReactNativeDependencies',
-      resolve: () => resolveRNDepsArtifact(resolvedRnVersion, flavor),
-      sharedName: (v /*: string */) =>
-        `reactnative-dependencies-${v}-${flavor}.tar.gz`,
+      resolve: () =>
+        resolveRNDepsArtifact(resolvedRnVersion, flavor, args.depsTarball),
+      // Local override skips the shared cache (as with core) so a local deps
+      // build can't poison the canonical downloads.
+      sharedName:
+        args.depsTarball != null
+          ? null
+          : (v /*: string */) =>
+              `reactnative-dependencies-${v}-${flavor}.tar.gz`,
     },
     {
       label: 'hermes',

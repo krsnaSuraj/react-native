@@ -149,19 +149,29 @@ function expandSpmDependencies(
   // package layout and the centralized headers tree. Surface it now with a
   // clear message instead of letting SPM emit a confusing duplicate-target
   // error later.
-  const seen /*: Map<string, string> */ = new Map();
+  // Key case-INSENSITIVELY: resolveSwiftName permits lowercase ('worklets')
+  // while toSwiftName produces TitleCase ('Worklets') — an exact-equality check
+  // passes but the two still collide as directories on the default
+  // case-insensitive macOS filesystem (synth package layout + headers tree).
+  const seen /*: Map<string, {name: string, swiftName: string}> */ = new Map();
   for (const dep of byName.values()) {
     const swiftName = dep.swiftName;
     if (swiftName == null) {
       continue;
     }
-    const existing = seen.get(swiftName);
+    const key = swiftName.toLowerCase();
+    const existing = seen.get(key);
     if (existing != null) {
+      const same = existing.swiftName === swiftName;
       throw new Error(
-        `react-native autolinking: SPM Swift name collision: '${existing}' and '${dep.name}' both resolve to '${swiftName}'. Set a distinct 'spm.name' in one of their react-native.config.js files.`,
+        `react-native autolinking: SPM Swift name collision: '${existing.name}' ('${existing.swiftName}') and '${dep.name}' ('${swiftName}') ` +
+          (same
+            ? `both resolve to '${swiftName}'.`
+            : `differ only in case, which collides on case-insensitive filesystems.`) +
+          ` Set a distinct 'spm.name' in one of their react-native.config.js files.`,
       );
     }
-    seen.set(swiftName, dep.name);
+    seen.set(key, {name: dep.name, swiftName});
   }
 
   return Array.from(byName.values());

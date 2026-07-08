@@ -10,7 +10,7 @@ How the third-party C/C++ deps (`RCT-Folly`, `glog`, `boost`,
 In prebuilt-deps mode the `ReactNativeDependencies` POD (CocoaPods) is the
 single authority for the third-party deps: compiled code lives in its
 xcframework binary, and the artifact's own
-`Headers/{folly,glog,boost,fmt,double-conversion,fast_float, SocketRocket}` are
+`Headers/{folly,glog,boost,fmt,double-conversion,fast_float,SocketRocket}` are
 flattened into the pod's `Headers/` by the podspec's `prepare_command`.
 Consumers resolve bare `<folly/...>` / `<SocketRocket/...>` via CocoaPods
 public-header linkage from `s.dependency "ReactNativeDependencies"`, plus an

@@ -5,6 +5,11 @@
 
 require 'json'
 require 'fileutils'
+# Self-contained against require ordering: this module reads
+# Helpers::Constants.socket_rocket_config. react_native_pods.rb normally loads
+# helpers.rb first, but requiring it here (idempotent) removes that implicit
+# dependency. The defined? guard at the use site stays as a backstop.
+require_relative './helpers'
 
 # Dependency-only facade podspecs for the third-party deps in prebuilt-deps
 # mode (deps-side analogue of RNCoreFacades). Design + rationale:
@@ -45,8 +50,12 @@ module RNDepsFacades
     # `react_native_path` locates the real third-party podspecs we mirror.
     # version + subspecs + default_subspecs are DERIVED from the real spec (or,
     # for SocketRocket, synthesized from the socket_rocket_config version) so the
-    # facade stays graph-equivalent to the source pod. NO source_files and NO
-    # headers are emitted — the ReactNativeDependencies pod supplies both. A
+    # facade matches the source pod's spec/subspec SHAPE. It is not fully
+    # graph-equivalent: every derived subspec depends only on
+    # ReactNativeDependencies, so intra-pod subspec deps (e.g. RCT-Folly/Fabric
+    # -> RCT-Folly/Default) are not reproduced — harmless here because the deps
+    # are all declared explicitly in react_native_pods.rb. NO source_files and
+    # NO headers are emitted — the ReactNativeDependencies pod supplies both. A
     # facaded pod whose real podspec can't be read is a hard error (see
     # load_real_spec) — silently shipping an empty facade would hide drift.
     def self.generate(react_native_path, install_root, ios_version)

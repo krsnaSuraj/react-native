@@ -47,7 +47,8 @@ def add_rn_third_party_dependencies(s)
         header_search_paths << "$(PODS_ROOT)/SocketRocket"
         header_search_paths << "$(PODS_ROOT)/RCT-Folly"
 
-        current_pod_target_xcconfig["HEADER_SEARCH_PATHS"] = header_search_paths
+        # uniq so a second call on the same spec can't duplicate entries.
+        current_pod_target_xcconfig["HEADER_SEARCH_PATHS"] = header_search_paths.uniq
     else
         # Prebuilt-deps mode: this pod SELF-SERVES the third-party headers from its
         # own xcframework (incl. SocketRocket - sole supplier in this mode). See

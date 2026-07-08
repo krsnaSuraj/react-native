@@ -299,6 +299,13 @@ export type PodspecModel = {
   // emit a louder banner in the scaffold summary explaining that dependency
   // wiring may be incomplete.
   partial: boolean,
+  // True when the podspec source calls `install_modules_dependencies(s)` —
+  // RN's Podfile-side helper that injects the React-Core family. We strip that
+  // helper before evaluating the spec (and the regex parser can't expand it),
+  // so React-Core never surfaces in `dependencies`. The scaffolder treats this
+  // flag as an implicit React-core dependency (a plain ObjC module using the
+  // helper has no `codegenConfig` to key off).
+  usesInstallModulesDependencies: boolean,
 };
 
 // Intermediate translation result — concrete data the Swift emitter consumes.

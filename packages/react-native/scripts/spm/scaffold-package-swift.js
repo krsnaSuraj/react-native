@@ -360,7 +360,16 @@ function translatePodspecToSpmTarget(
   // headers live in the per-app React-GeneratedCode package, so the lib must
   // depend on it (and, transitively, on React core). Treat codegenConfig as
   // an implicit React-core dependency.
-  if (!coreReactNative && depHasCodegenConfig(dep.root)) {
+  // `codegenConfig` only marks Fabric/New-Arch libraries. A plain ObjC module
+  // (e.g. rn-tester's TestLibrary*) that wires React core solely through
+  // `install_modules_dependencies(s)` has no codegenConfig — but the helper's
+  // presence is itself an authoritative "depends on React core" signal, so
+  // treat it the same way.
+  if (
+    !coreReactNative &&
+    (depHasCodegenConfig(dep.root) ||
+      model.usesInstallModulesDependencies === true)
+  ) {
     coreReactNative = true;
   }
 

@@ -46,6 +46,7 @@ function podspec(overrides /*: Object */ = {}) {
     requiresArc: true,
     warnings: [],
     partial: false,
+    usesInstallModulesDependencies: false,
     ...overrides,
   };
 }
@@ -334,6 +335,31 @@ describe('translatePodspecToSpmTarget', () => {
       const spec = translatePodspecToSpmTarget(
         model,
         autolinkedDep({name: 'react-native-svg', root}),
+      );
+      expect(spec.coreReactNative).toBe(true);
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('treats install_modules_dependencies (no codegenConfig) as an implicit React-core dep (rn-tester TestLibrary shape)', () => {
+    // A plain ObjC module (rn-tester's TestLibraryApple/Common) wires React
+    // core ONLY via install_modules_dependencies(s) and has NO codegenConfig.
+    // The stripped helper leaves model.dependencies without React-Core, so the
+    // usesInstallModulesDependencies marker is what keeps coreReactNative true.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imd-dep-'));
+    try {
+      fs.writeFileSync(
+        path.join(root, 'package.json'),
+        JSON.stringify({name: 'TestLibraryApple'}), // no codegenConfig
+      );
+      const model = podspec({
+        dependencies: [],
+        usesInstallModulesDependencies: true,
+      });
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'TestLibraryApple', root}),
       );
       expect(spec.coreReactNative).toBe(true);
     } finally {

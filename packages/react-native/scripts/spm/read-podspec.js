@@ -631,6 +631,8 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
     requiresArc,
     warnings,
     partial,
+    // Default: overridden in readPodspec, which can see the podspec source.
+    usesInstallModulesDependencies: false,
   };
 }
 
@@ -654,7 +656,20 @@ function readPodspec(podspecPath /*: string */) /*: PodspecModel */ {
   }
   const podIpc = runPodIpcSpec(podspecPath);
   const raw = podIpc != null ? podIpc : regexPodspec(podspecPath);
-  return flattenSubspecs(raw);
+  const model = flattenSubspecs(raw);
+  // Record whether the podspec calls `install_modules_dependencies(s)`. We
+  // strip that helper before `pod ipc` and the regex parser can't expand it,
+  // so the React-Core family it injects never lands in `model.dependencies`.
+  // The scaffolder uses this as an implicit React-core marker (plain ObjC
+  // modules using the helper have no `codegenConfig` to detect instead).
+  try {
+    const src = fs.readFileSync(podspecPath, 'utf8');
+    model.usesInstallModulesDependencies =
+      /\binstall_modules_dependencies\b/.test(src);
+  } catch {
+    // best-effort; leave the flattenSubspecs default (false)
+  }
+  return model;
 }
 
 module.exports = {

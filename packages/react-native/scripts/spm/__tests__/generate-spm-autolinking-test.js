@@ -21,6 +21,7 @@ const {
   hasMixedLanguageSources,
   hasPodspec,
   linkHeaderTree,
+  main,
   reactDescriptor,
   reportMissingManifests,
 } = require('../generate-spm-autolinking');
@@ -996,5 +997,109 @@ describe('hasMixedLanguageSources', () => {
     fs.mkdirSync(path.join(root, 'example', 'ios'), {recursive: true});
     fs.writeFileSync(path.join(root, 'example', 'ios', 'App.swift'), '');
     expect(hasMixedLanguageSources(root)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// main() — autolinking plugin host exemption
+//
+// A dep that declares an autolinking plugin OWNS its native contribution (the
+// plugin returns its package/product deps). RN must NOT also try to
+// source-build that dep through the community-lib path: a plugin host like
+// Expo typically ships no Package.swift and is mixed Swift/ObjC, so the
+// community-lib path would raise MissingManifestError before the plugin ever
+// runs. The regression pair below pins that exemption down — the negative
+// control proves it is load-bearing (remove the plugin and the SAME dep throws).
+// ---------------------------------------------------------------------------
+
+describe('main() — autolinking plugin host exemption', () => {
+  let created = [];
+  let spies = [];
+
+  beforeEach(() => {
+    // Silence the [generate-spm-autolinking] logger (console.log/warn/error).
+    for (const m of ['log', 'warn', 'error']) {
+      spies.push(jest.spyOn(console, m).mockImplementation(() => {}));
+    }
+  });
+
+  afterEach(() => {
+    for (const s of spies) s.mockRestore();
+    spies = [];
+    for (const d of created) fs.rmSync(d, {recursive: true, force: true});
+    created = [];
+  });
+
+  // Builds a minimal app fixture whose ONLY autolinked iOS dep is `expo`, which
+  // ships NO Package.swift. When `withPlugin` is set, expo declares an
+  // autolinking plugin in its own react-native.config.js (transitive opt-in).
+  function buildFixture({withPlugin}) {
+    const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-plugin-host-'));
+    created.push(appRoot);
+    // rnRoot only needs to exist (main() existence-checks it, then passes it
+    // through as context.reactNativeRoot).
+    const rnRoot = path.join(appRoot, 'rn');
+    fs.mkdirSync(rnRoot, {recursive: true});
+    // package.json so findProjectRoot() resolves to appRoot.
+    fs.writeFileSync(
+      path.join(appRoot, 'package.json'),
+      JSON.stringify({name: 'app'}),
+    );
+    // The plugin-host dep: native sources present, but NO Package.swift.
+    const expoDir = path.join(appRoot, 'node_modules', 'expo');
+    fs.mkdirSync(path.join(expoDir, 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(expoDir, 'ios', 'Expo.mm'), '// native source\n');
+    if (withPlugin) {
+      fs.writeFileSync(
+        path.join(expoDir, 'react-native.config.js'),
+        "module.exports = { spm: { autolinkingPlugin: './spm-plugin.js' } };\n",
+      );
+      fs.writeFileSync(
+        path.join(expoDir, 'spm-plugin.js'),
+        'module.exports = function () {\n' +
+          '  return {\n' +
+          "    packageDependencies: [{name: 'ExpoModulesCore', path: '../../../../node_modules/expo/ios'}],\n" +
+          "    productDependencies: [{name: 'ExpoModulesCore', package: 'ExpoModulesCore'}],\n" +
+          '  };\n' +
+          '};\n',
+      );
+    }
+    const autolinkDir = path.join(appRoot, 'build', 'generated', 'autolinking');
+    fs.mkdirSync(autolinkDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(autolinkDir, 'autolinking.json'),
+      JSON.stringify({
+        dependencies: {expo: {root: expoDir, platforms: {ios: {}}}},
+      }),
+    );
+    return {appRoot, rnRoot};
+  }
+
+  it('exempts a plugin-host dep from source-building (no MissingManifestError; plugin contribution merged)', () => {
+    const {appRoot, rnRoot} = buildFixture({withPlugin: true});
+    expect(() =>
+      main(['--app-root', appRoot, '--react-native-root', rnRoot]),
+    ).not.toThrow();
+
+    const pkg = fs.readFileSync(
+      path.join(appRoot, 'build/generated/autolinking/Package.swift'),
+      'utf8',
+    );
+    // The plugin's contribution is present …
+    expect(pkg).toContain('.package(name: "ExpoModulesCore"');
+    expect(pkg).toContain(
+      '.product(name: "ExpoModulesCore", package: "ExpoModulesCore")',
+    );
+    // … and expo is NOT source-built as a community lib: no wrapper package
+    // reference and no eval-time missing-manifest guard.
+    expect(pkg).not.toContain('path: "packages/');
+    expect(pkg).not.toContain('__rnAutolinkedLibs');
+  });
+
+  it('negative control: without the plugin declaration the SAME dep throws MissingManifestError (exemption is load-bearing)', () => {
+    const {appRoot, rnRoot} = buildFixture({withPlugin: false});
+    expect(() =>
+      main(['--app-root', appRoot, '--react-native-root', rnRoot]),
+    ).toThrow(MissingManifestError);
   });
 });

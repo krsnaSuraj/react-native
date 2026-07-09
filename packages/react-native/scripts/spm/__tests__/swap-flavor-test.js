@@ -10,6 +10,30 @@
 
 'use strict';
 
+// swap-flavor.js shells out to `plutil` to read an xcframework's Info.plist as
+// JSON — plutil is macOS-only, so on Linux CI the real spawn ENOENTs and
+// jest-worker can't serialize the resulting error, killing the whole suite.
+// Stand in with a portable plist-parse. Mocked at the `child_process` module
+// level (not via jest.spyOn) because swap-flavor.js destructures
+// `execFileSync` at require time, so a post-import spy would never be seen.
+jest.mock('child_process', () => {
+  const actual = jest.requireActual('child_process');
+  return {
+    ...actual,
+    execFileSync: (cmd, args, opts) => {
+      if (cmd === 'plutil') {
+        const fs = require('fs');
+        const plist = require('plist');
+        const file = args[args.length - 1];
+        return Buffer.from(
+          JSON.stringify(plist.parse(fs.readFileSync(file, 'utf8'))),
+        );
+      }
+      return actual.execFileSync(cmd, args, opts);
+    },
+  };
+});
+
 const {matchSlice, swapFlavorFrameworks} = require('../swap-flavor');
 const fs = require('fs');
 const os = require('os');

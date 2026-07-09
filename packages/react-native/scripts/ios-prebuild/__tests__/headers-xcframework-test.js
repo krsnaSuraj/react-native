@@ -66,10 +66,10 @@ describe('stubSlicesFromXcframework', () => {
   // The plist shape is a pure function of plutil's JSON; mock it so the
   // SupportedPlatform/Variant -> key mapping and the unknown-slice guard can be
   // tested without a real xcframework or macOS tooling.
-  const mockPlist = (obj /*: mixed */) =>
+  const mockPlist = (obj /*: unknown */) =>
     jest
       .spyOn(childProcess, 'execSync')
-      .mockReturnValue(Buffer.from(JSON.stringify(obj)));
+      .mockReturnValue(Buffer.from(JSON.stringify(obj) ?? '', 'utf8'));
 
   afterEach(() => {
     jest.restoreAllMocks();

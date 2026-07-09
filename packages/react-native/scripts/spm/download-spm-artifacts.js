@@ -258,7 +258,10 @@ async function resolveNightlyVersion(
 // then passed to tar/cp via execFileSync). Constrain it to a safe charset so a
 // malformed/hostile registry response can't produce a surprising path or a
 // confusing 404 — and so static analysis sees an explicit sanitizer.
-function assertSafeVersion(ver /*: mixed */, source /*: string */) /*: void */ {
+function assertSafeVersion(
+  ver /*: unknown */,
+  source /*: string */,
+) /*: void */ {
   if (typeof ver !== 'string' || !/^[A-Za-z0-9._-]+$/.test(ver)) {
     throw new Error(
       `npm response for ${source} has no usable "version" field (got: ${String(ver)})`,

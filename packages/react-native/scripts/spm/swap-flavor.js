@@ -129,7 +129,7 @@ function swapFlavorFrameworks(
   if (process.env.RN_SPM_SWAP_DEBUG === '1') {
     logger.log(`swap-flavor[debug]: linkTarget=${linkTarget}`);
     logger.log(
-      `swap-flavor[debug]: slot=${slot} exists=${fs.existsSync(slot)}`,
+      `swap-flavor[debug]: slot=${slot} exists=${String(fs.existsSync(slot))}`,
     );
     for (const n of FLAVORED_XCFRAMEWORKS) {
       const x = path.join(slot, `${n}.xcframework`);
@@ -137,12 +137,12 @@ function swapFlavorFrameworks(
         ? matchSlice(x, platformName, isMacCatalyst)
         : '(no-xcfw)';
       logger.log(
-        `swap-flavor[debug]:   ${n}: xcfw=${fs.existsSync(x)} slice=${sid}`,
+        `swap-flavor[debug]:   ${n}: xcfw=${String(fs.existsSync(x))} slice=${sid ?? '(none)'}`,
       );
     }
     logger.log(`swap-flavor[debug]: BUILT_PRODUCTS_DIR=${builtProductsDir}`);
     logger.log(
-      `swap-flavor[debug]: PackageFrameworks exists=${fs.existsSync(pkgFrameworks)}`,
+      `swap-flavor[debug]: PackageFrameworks exists=${String(fs.existsSync(pkgFrameworks))}`,
     );
     try {
       const found = execFileSync('/usr/bin/find', [

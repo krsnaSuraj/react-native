@@ -39,6 +39,7 @@ export type DownloadArgs = {
   output: string | null,
   coreTarball: string | null,
   headersTarball: string | null,
+  depsTarball: string | null,
   depsHeadersTarball: string | null,
 };
 

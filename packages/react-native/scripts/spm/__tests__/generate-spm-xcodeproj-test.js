@@ -499,6 +499,34 @@ describe('buildSyncAutolinkingScript — swap sandwich + hard-fail', () => {
     expect(script.indexOf('exit 1', gate)).toBeGreaterThan(gate);
   });
 
+  it('invalidates the Swift explicit-module + build-description caches ONLY inside the hard-fail block', () => {
+    const gate = script.indexOf('if [ "$MISMATCH_PENDING" -eq 1 ]');
+    const exitIdx = script.indexOf('exit 1', gate);
+    const rmIdx = script.indexOf('ExplicitPrecompiledModules');
+    // All three dirs are cleared together (the pcm dirs AND XCBuildData, whose
+    // scan state references the pcms by absolute path).
+    expect(script).toContain('ExplicitPrecompiledModules');
+    expect(script).toContain('SwiftExplicitPrecompiledModules');
+    expect(script).toContain('XCBuildData');
+    // The invalidation is INSIDE the hard-fail block: after the trailing swap,
+    // after the gate, and BEFORE the exit 1.
+    expect(rmIdx).toBeGreaterThan(script.lastIndexOf('run_swap_flavor'));
+    expect(rmIdx).toBeGreaterThan(gate);
+    expect(rmIdx).toBeLessThan(exitIdx);
+    // Gated on OBJROOT and unconditionally non-fatal (can't mask the exit 1).
+    expect(script).toContain('if [ -n "${OBJROOT:-}" ]');
+    // A single rm -rf clears all three (pcm dirs + XCBuildData), non-fatal.
+    expect(script).toMatch(
+      /rm -rf[^\n]*ExplicitPrecompiledModules[^\n]*XCBuildData[^\n]*true/,
+    );
+    // NEVER present in the sync-only pre-action variant.
+    for (const needle of ['ExplicitPrecompiledModules', 'XCBuildData']) {
+      expect(
+        buildSchemePreActionScript('../node_modules/react-native'),
+      ).not.toContain(needle);
+    }
+  });
+
   it('parses under `sh -n`', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phase-'));
     const file = path.join(dir, 'phase.sh');
@@ -559,17 +587,24 @@ describe('sync script — shell behavior of HARD-FAIL + CONVERGE', () => {
 
   afterEach(() => fs.rmSync(dir, {recursive: true, force: true}));
 
-  function run(scriptFile, configuration) {
+  function run(scriptFile, configuration, objroot) {
+    const env = {
+      ...process.env,
+      SRCROOT: srcroot,
+      BUILT_PRODUCTS_DIR: path.join(dir, 'products'),
+      NODE_BINARY: process.execPath,
+      CONFIGURATION: configuration,
+      FAKE_PIN_FILE: pinFile,
+    };
+    // Control OBJROOT explicitly (don't leak the host's).
+    if (objroot != null) {
+      env.OBJROOT = objroot;
+    } else {
+      delete env.OBJROOT;
+    }
     try {
       execFileSync('/bin/sh', [scriptFile], {
-        env: {
-          ...process.env,
-          SRCROOT: srcroot,
-          BUILT_PRODUCTS_DIR: path.join(dir, 'products'),
-          NODE_BINARY: process.execPath,
-          CONFIGURATION: configuration,
-          FAKE_PIN_FILE: pinFile,
-        },
+        env,
         stdio: ['ignore', 'pipe', 'pipe'],
         encoding: 'utf8',
       });
@@ -599,5 +634,40 @@ describe('sync script — shell behavior of HARD-FAIL + CONVERGE', () => {
   it('SUCCEEDS (exit 0) when the build started matched (Debug on debug)', () => {
     const {code} = run(setup('debug'), 'Debug');
     expect(code).toBe(0);
+  });
+
+  it('on a true-mismatch hard-fail, invalidates the pcm + XCBuildData caches (dirs gone, still exit 1)', () => {
+    const scriptFile = setup('debug'); // start debug, build Release → mismatch
+    const objroot = path.join(dir, 'obj');
+    const cache = path.join(objroot, 'ExplicitPrecompiledModules');
+    const xcbuild = path.join(objroot, 'XCBuildData');
+    fs.mkdirSync(cache, {recursive: true});
+    fs.mkdirSync(xcbuild, {recursive: true});
+    fs.writeFileSync(path.join(cache, 'stale.pcm'), 'x');
+    const {code} = run(scriptFile, 'Release', objroot);
+    expect(code).toBe(1);
+    // Both the pcm dir AND the build-description/scan cache are gone — deleting
+    // one without the other strands the rebuild.
+    expect(fs.existsSync(cache)).toBe(false);
+    expect(fs.existsSync(xcbuild)).toBe(false);
+  });
+
+  it('leaves the pcm + XCBuildData caches intact on a matched (green) build', () => {
+    const scriptFile = setup('debug'); // matched Debug build → no hard-fail
+    const objroot = path.join(dir, 'obj');
+    const cache = path.join(objroot, 'ExplicitPrecompiledModules');
+    const xcbuild = path.join(objroot, 'XCBuildData');
+    fs.mkdirSync(cache, {recursive: true});
+    fs.mkdirSync(xcbuild, {recursive: true});
+    const {code} = run(scriptFile, 'Debug', objroot);
+    expect(code).toBe(0);
+    expect(fs.existsSync(cache)).toBe(true);
+    expect(fs.existsSync(xcbuild)).toBe(true);
+  });
+
+  it('mismatch still exits 1 cleanly when OBJROOT is unset (no rm error noise)', () => {
+    const {code, out} = run(setup('debug'), 'Release', undefined);
+    expect(code).toBe(1);
+    expect(out).not.toMatch(/rm:/);
   });
 });

@@ -629,6 +629,23 @@ fi
 # rebuild is green and nothing stale ever ships. Fires only when the swap ran and
 # actually corrected a mismatch (the CLI already printed the actionable error:).
 if [ "$MISMATCH_PENDING" -eq 1 ]; then
+  # Best-effort: this deliberate red build already PLANNED against the pre-flip
+  # graph, precompiling Swift explicit modules from the debug -Onone interfaces
+  # (which depend on SwiftOnoneSupport). Those caches are NOT keyed by anything
+  # the flavor flip changed, so the Release rebuild would reuse them and fail
+  # ('missing required module SwiftOnoneSupport'). Drop them so the rebuild
+  # re-precompiles against the corrected graph. XCBuildData MUST go WITH the pcm
+  # dirs: it holds the build-description / dependency-scan state that references
+  # the precompiled modules by ABSOLUTE path, so deleting the pcm dirs alone
+  # strands the rebuild ('module file .../….pcm not found'), and deleting
+  # XCBuildData alone leaves the stale debug pcms in place — both directions are
+  # empirically proven broken, so all three are cleared together. Both pcm dir
+  # namings exist across Xcode versions; guarded + '|| true' so it can NEVER mask
+  # the deliberate build failure below.
+  if [ -n "\${OBJROOT:-}" ]; then
+    echo "Invalidating Swift explicit-module + build-description caches so the rebuild re-precompiles against the switched flavor..."
+    rm -rf "$OBJROOT/ExplicitPrecompiledModules" "$OBJROOT/SwiftExplicitPrecompiledModules" "$OBJROOT/XCBuildData" 2>/dev/null || true
+  fi
   echo "error: React Native SwiftPM frameworks were on the wrong flavor for this \${CONFIGURATION:-} build and have been switched — build again (one-time after a configuration change)."
   exit 1
 fi

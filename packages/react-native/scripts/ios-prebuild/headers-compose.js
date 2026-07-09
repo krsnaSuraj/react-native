@@ -180,7 +180,7 @@ function emitReactFrameworkHeaders(
     if (i18nLocales > 0) {
       const dest = path.join(fwk, 'RCTI18nStrings.bundle');
       fs.rmSync(dest, {recursive: true, force: true});
-      execFileSync('/bin/cp', ['-Rc', i18nBundleStage, dest]);
+      execFileSync('/bin/cp', [CP_FLAGS, i18nBundleStage, dest]);
     }
   }
   fs.rmSync(stage, {recursive: true, force: true});

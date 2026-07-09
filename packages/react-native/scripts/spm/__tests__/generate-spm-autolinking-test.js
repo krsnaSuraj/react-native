@@ -1250,3 +1250,126 @@ describe('main() — flavoredArtifacts sidecar', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// main() — .spm-sync-watch-paths emission (mixed dirs + files)
+//
+// The watch file drives the Xcode auto-sync stale check. It must carry, mixed
+// and deduped/sorted: (1) each module's source DIR; (2) each npm dep's
+// checked-in root Package.swift (FILE) and .react-native/ (DIR) — threaded from
+// the autolinking model's dep root, not derived by walking up; (3) plugin
+// watchPaths. Nonexistent paths are filtered at emission time.
+// ---------------------------------------------------------------------------
+
+describe('main() — .spm-sync-watch-paths emission', () => {
+  let created = [];
+  let spies = [];
+
+  beforeEach(() => {
+    for (const m of ['log', 'warn', 'error']) {
+      spies.push(jest.spyOn(console, m).mockImplementation(() => {}));
+    }
+  });
+  afterEach(() => {
+    for (const s of spies) s.mockRestore();
+    spies = [];
+    for (const d of created) fs.rmSync(d, {recursive: true, force: true});
+    created = [];
+  });
+
+  function readWatchLines(appRoot) {
+    const contents = fs.readFileSync(
+      path.join(appRoot, 'build/generated/autolinking/.spm-sync-watch-paths'),
+      'utf8',
+    );
+    return contents.split('\n').filter(l => l.length > 0);
+  }
+
+  it('emits source dirs + dep manifests + .react-native dirs + plugin paths, deduped and sorted', () => {
+    // realpath so paths derived here match a plugin's realpath'd __dirname
+    // (macOS /var → /private/var symlink).
+    const appRoot = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'spm-watch-emit-')),
+    );
+    created.push(appRoot);
+    const rnRoot = path.join(appRoot, 'rn');
+    fs.mkdirSync(rnRoot, {recursive: true});
+    fs.writeFileSync(
+      path.join(appRoot, 'package.json'),
+      JSON.stringify({name: 'app'}),
+    );
+
+    // (B) A self-managed community dep: root Package.swift (no AUTOGEN marker)
+    // makes it self-managed; it also ships a .react-native/ metadata dir.
+    const fooDir = path.join(appRoot, 'node_modules', 'react-native-foo');
+    fs.mkdirSync(fooDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(fooDir, 'Package.swift'),
+      '// swift-tools-version:5.9\n// hand-authored\n',
+    );
+    fs.mkdirSync(path.join(fooDir, '.react-native'));
+    fs.writeFileSync(path.join(fooDir, '.react-native', 'meta.json'), '{}\n');
+    fs.writeFileSync(path.join(fooDir, 'Foo.swift'), '// src\n');
+
+    // (C) A plugin-host dep contributing watchPaths: one existing absolute path
+    // (kept), one absent absolute path (filtered at emission), one relative
+    // path (dropped by invokePlugins).
+    const expoDir = path.join(appRoot, 'node_modules', 'expo');
+    fs.mkdirSync(path.join(expoDir, 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(expoDir, 'ios', 'Expo.mm'), '// native\n');
+    fs.writeFileSync(path.join(expoDir, 'Package.swift'), '// expo manifest\n');
+    fs.writeFileSync(
+      path.join(expoDir, 'react-native.config.js'),
+      "module.exports = { spm: { autolinkingPlugin: './spm-plugin.js' } };\n",
+    );
+    fs.writeFileSync(
+      path.join(expoDir, 'spm-plugin.js'),
+      [
+        "const path = require('path');",
+        'module.exports = function () {',
+        '  return {',
+        "    packageDependencies: [{name: 'ExpoModulesCore', path: '../../../../node_modules/expo/ios'}],",
+        "    productDependencies: [{name: 'ExpoModulesCore', package: 'ExpoModulesCore'}],",
+        '    watchPaths: [',
+        "      path.join(__dirname, 'Package.swift'),", // exists → kept
+        "      path.join(__dirname, 'MISSING.swift'),", // absent → filtered at emission
+        "      'rel/manifest',", // relative → dropped by invokePlugins
+        '    ],',
+        '  };',
+        '};',
+      ].join('\n') + '\n',
+    );
+
+    const autolinkDir = path.join(appRoot, 'build', 'generated', 'autolinking');
+    fs.mkdirSync(autolinkDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(autolinkDir, 'autolinking.json'),
+      JSON.stringify({
+        dependencies: {
+          'react-native-foo': {root: fooDir, platforms: {ios: {}}},
+          expo: {root: expoDir, platforms: {ios: {}}},
+        },
+      }),
+    );
+
+    main(['--app-root', appRoot, '--react-native-root', rnRoot]);
+
+    const lines = readWatchLines(appRoot);
+
+    // (A/B) foo's source dir, root manifest FILE, and .react-native DIR.
+    expect(lines).toContain(fooDir);
+    expect(lines).toContain(path.join(fooDir, 'Package.swift'));
+    expect(lines).toContain(path.join(fooDir, '.react-native'));
+
+    // (C) plugin's existing absolute watchPath is kept.
+    expect(lines).toContain(path.join(expoDir, 'Package.swift'));
+
+    // Filtered / dropped entries never reach the file.
+    expect(lines.some(l => l.includes('MISSING.swift'))).toBe(false);
+    expect(lines.some(l => l.includes('rel/manifest'))).toBe(false);
+
+    // Deduped and sorted (stable, deterministic output).
+    expect(new Set(lines).size).toBe(lines.length);
+    expect([...lines].sort()).toEqual(lines);
+  });
+});

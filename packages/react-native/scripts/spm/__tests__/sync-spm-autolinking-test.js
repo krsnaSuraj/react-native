@@ -118,6 +118,7 @@ describe('main', () => {
       installSpmCodegenTemplate: jest.fn(),
       buildPerAppHeaderTree: jest.fn(),
       findProjectRoot: jest.fn(p => p),
+      readArtifactsVersionOverride: jest.fn(() => null),
       ...over,
     };
   }
@@ -188,6 +189,59 @@ describe('main', () => {
     expect(deps.generateAutolinking).toHaveBeenCalledWith(
       expect.arrayContaining(['--flavor', 'release']),
     );
+  });
+
+  it('prefers a pinned artifactsVersionOverride over the package.json version, and logs it', async () => {
+    const deps = makeDeps({
+      readArtifactsVersionOverride: jest.fn(() => '0.79.0'),
+      // Echo the requested version back so the assertions below can verify
+      // it (rather than the package.json-derived '0.85.0') flowed through.
+      resolveCacheSlotVersion: jest.fn(async v => v),
+    });
+    await run(deps);
+
+    expect(deps.readArtifactsVersionOverride).toHaveBeenCalledWith(appRoot);
+    expect(deps.resolveCacheSlotVersion).toHaveBeenCalledWith('0.79.0');
+    expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.79.0', 'debug');
+    expect(deps.downloadArtifacts).toHaveBeenCalledWith(
+      expect.arrayContaining(['--version', '0.79.0']),
+    );
+    expect(
+      logSpy.mock.calls.some(call =>
+        call.some(
+          arg =>
+            typeof arg === 'string' &&
+            arg.includes(
+              'Using pinned artifacts version 0.79.0 (from .spm-injected.json)',
+            ),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('falls back to the package.json version when no override is pinned (no log line)', async () => {
+    const deps = makeDeps(); // readArtifactsVersionOverride defaults to null
+    await run(deps);
+
+    expect(deps.resolveCacheSlotVersion).toHaveBeenCalledWith('0.85.0');
+    expect(
+      logSpy.mock.calls.some(call =>
+        call.some(
+          arg => typeof arg === 'string' && arg.includes('pinned artifacts'),
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('a malformed/absent marker falls back to the package.json version, no throw', async () => {
+    // readArtifactsVersionOverride itself never throws (see
+    // generate-spm-xcodeproj-test / remove-spm-injection-test); this
+    // exercises sync's consumption of a null result end-to-end.
+    const deps = makeDeps({
+      readArtifactsVersionOverride: jest.fn(() => null),
+    });
+    await expect(run(deps)).resolves.toBeUndefined();
+    expect(deps.resolveCacheSlotVersion).toHaveBeenCalledWith('0.85.0');
   });
 
   it('local mode, populated cache: skips download but still generates', async () => {

@@ -471,14 +471,27 @@ if [ "$STALE" -eq 0 ] && [ "$SRCROOT" != "$PROJECT_ROOT" ]; then
   fi
 fi
 
-# Check 1.5: watched module source dirs (catches add/remove of source files
-# in spm.modules and autolinked deps). Directory mtime updates on both add
-# and remove of children, so a single -newer check covers both cases.
+# Check 1.5: watched paths (mixed dirs AND files). Dirs catch add/remove of
+# source files in spm.modules and autolinked deps (dir mtime updates on both);
+# files catch edits to a dep's checked-in Package.swift / plugin manifests that
+# would not bump any parent dir mtime. A path that has VANISHED (renamed/moved
+# module root) forces a re-sync so the autolinker surfaces the real, actionable
+# config error rather than the build failing later on dangling-symlink noise.
 WATCH_FILE="$SRCROOT/build/generated/autolinking/.spm-sync-watch-paths"
 if [ "$STALE" -eq 0 ] && [ -f "$WATCH_FILE" ]; then
-  while IFS= read -r DIR; do
-    [ -z "$DIR" ] && continue
-    if [ -d "$DIR" ] && [ -n "$(find "$DIR" -newer "$STAMP" -print -quit 2>/dev/null)" ]; then
+  while IFS= read -r P; do
+    [ -z "$P" ] && continue
+    if [ -d "$P" ]; then
+      if [ -n "$(find "$P" -newer "$STAMP" -print -quit 2>/dev/null)" ]; then
+        STALE=1
+        break
+      fi
+    elif [ -f "$P" ]; then
+      if [ "$P" -nt "$STAMP" ]; then
+        STALE=1
+        break
+      fi
+    else
       STALE=1
       break
     fi
@@ -1678,11 +1691,12 @@ function readGeneratedSourcesManifest(
 
 /**
  * Read the `.spm-injected.json` marker of a previously-injected project, or
- * null when absent/unreadable. Used to reconcile generated sources on `update`.
+ * null when absent/unreadable. Used to reconcile generated sources on `update`
+ * and to read back a pinned `artifactsVersionOverride` (see below).
  */
 function readMarker(
   xcodeprojPath /*: string */,
-) /*: ?{generatedSources?: {[string]: Array<string>}, ...} */ {
+) /*: ?{generatedSources?: {[string]: Array<string>}, artifactsVersionOverride?: ?string, ...} */ {
   const markerPath = path.join(xcodeprojPath, SPM_INJECTED_MARKER);
   try {
     // $FlowFixMe[incompatible-return] JSON.parse returns any
@@ -1692,13 +1706,58 @@ function readMarker(
   }
 }
 
+// Returns the `*.xcodeproj` under `appRoot` carrying a `.spm-injected.json`
+// marker (the user-owned project SPM packages were injected into in place),
+// or null when none has been injected yet. Pure fs reads — safe for the
+// build-time sync (sync-spm-autolinking.js, via readArtifactsVersionOverride
+// below) to call without pulling in any pbxproj-editing machinery at runtime.
+function findInjectedXcodeproj(appRoot /*: string */) /*: string | null */ {
+  let entries /*: Array<{name: string, isDirectory(): boolean}> */;
+  try {
+    // $FlowFixMe[incompatible-type] Dirent typing
+    entries = fs.readdirSync(appRoot, {withFileTypes: true});
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
+    const name /*: string */ = entry.name;
+    if (!name.endsWith('.xcodeproj')) continue;
+    if (fs.existsSync(path.join(appRoot, name, SPM_INJECTED_MARKER))) {
+      return path.join(appRoot, name);
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the `artifactsVersionOverride` a previous `spm add --version` / `spm
+ * update --version` pinned into the injected xcodeproj's `.spm-injected.json`
+ * marker (see the field's doc comment in injectSpmIntoExistingXcodeproj
+ * below), or null when no project is injected yet, no override is pinned, or
+ * the marker can't be read (never throws). Pure fs reads — the build-time
+ * sync (sync-spm-autolinking.js) calls this to prefer the pinned version over
+ * the one derived from node_modules/react-native/package.json, so a
+ * version-mismatched setup keeps healing against the SAME artifact slot the
+ * explicit `--version` selected.
+ */
+function readArtifactsVersionOverride(appRoot /*: string */) /*: ?string */ {
+  const xcodeprojPath = findInjectedXcodeproj(appRoot);
+  if (xcodeprojPath == null) {
+    return null;
+  }
+  const override = readMarker(xcodeprojPath)?.artifactsVersionOverride;
+  return typeof override === 'string' && override.length > 0 ? override : null;
+}
+
 /**
  * Add SPM packages to a user's EXISTING xcodeproj in place. Returns
  * {status: 'injected', target} on success, or {status: 'refused', reason}
  * when the project can't be safely edited (caller surfaces it; fail-loud).
  */
 function injectSpmIntoExistingXcodeproj(
-  opts /*: {appRoot: string, reactNativeRoot: string, xcodeprojPath: string, appName?: ?string} */,
+  opts /*: {appRoot: string, reactNativeRoot: string, xcodeprojPath: string, appName?: ?string, artifactsVersionOverride?: ?string} */,
 ) /*: {status: 'injected', target: string} | {status: 'refused', reason: string} */ {
   const {appRoot, reactNativeRoot, xcodeprojPath} = opts;
   const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
@@ -1718,6 +1777,8 @@ function injectSpmIntoExistingXcodeproj(
   const hermesCliPath = resolveHermesCliPathSetting(reactNativeRoot);
   const generatedSources = readGeneratedSourcesManifest(appRoot);
 
+  const prevMarker = readMarker(xcodeprojPath);
+
   // Reconcile generated sources injected on a PRIOR run that are no longer in
   // the manifest (a plugin's entry was dropped, or the plugin was removed).
   // Diff the marker's `generatedSources` map against the current manifest and
@@ -1726,7 +1787,7 @@ function injectSpmIntoExistingXcodeproj(
   // byte-identical. deinit needs none of this: the removed objects live in
   // `injectedUuids`.
   const prevGeneratedSources /*: {[string]: Array<string>} */ =
-    readMarker(xcodeprojPath)?.generatedSources ?? {};
+    prevMarker?.generatedSources ?? {};
   const currentPaths = new Set(generatedSources.map(s => s.path));
   const staleUuids /*: Array<string> */ = [];
   for (const p of Object.keys(prevGeneratedSources)) {
@@ -1788,6 +1849,21 @@ function injectSpmIntoExistingXcodeproj(
   });
   log(`Scheme sync pre-action: ${schemeResult.status}`);
 
+  // The RN version this app's xcframework artifact-cache slot should be
+  // pinned to, when `add`/`update` was given an EXPLICIT `--version` — SETS
+  // the pin. Omitting `--version` (opts.artifactsVersionOverride is null)
+  // PRESERVES whatever was recorded on a prior run, since it's an
+  // intentional pin, not something to silently re-derive from
+  // node_modules/react-native/package.json. There is no "clear" verb yet;
+  // `deinit` (removeSpmInjection) drops the whole marker, including this
+  // field. Read back by readArtifactsVersionOverride (above) so the
+  // build-time sync (sync-spm-autolinking.js) heals against the SAME slot
+  // `add`/`update` selected, even on a version-mismatched setup.
+  const artifactsVersionOverride =
+    opts.artifactsVersionOverride ??
+    prevMarker?.artifactsVersionOverride ??
+    null;
+
   // Marker: idempotency signal + the exact, reversible record of every edit so
   // `deinit` (removeSpmInjection) can undo precisely what was added.
   writeIfChanged(
@@ -1803,6 +1879,7 @@ function injectSpmIntoExistingXcodeproj(
         // Normalized path → [fileRefUuid, buildFileUuid]. Read back on the next
         // `update` to reconcile away entries that left the manifest.
         generatedSources: generatedSourceUuids,
+        artifactsVersionOverride,
         scheme: {
           file: schemeResult.file,
           created: schemeResult.status === 'created',
@@ -1968,5 +2045,7 @@ module.exports = {
   cleanupDanglingJavaScriptCoreRef,
   addPreActionToScheme,
   removePreActionFromScheme,
+  findInjectedXcodeproj,
+  readArtifactsVersionOverride,
   SPM_INJECTED_MARKER,
 };

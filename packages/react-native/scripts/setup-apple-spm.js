@@ -88,9 +88,9 @@ const {
 const {main: generatePackage} = require('./spm/generate-spm-package');
 const {findSourcePath} = require('./spm/generate-spm-package');
 const {
-  SPM_INJECTED_MARKER,
   cleanupDanglingJavaScriptCoreRef,
   cleanupLeftoverPodsGroup,
+  findInjectedXcodeproj,
   injectSpmIntoExistingXcodeproj,
   removeSpmInjection,
 } = require('./spm/generate-spm-xcodeproj');
@@ -884,6 +884,11 @@ async function setupXcodeproj(
     reactNativeRoot,
     xcodeprojPath,
     appName: args.productName,
+    // Only an EXPLICIT `--version` pins the artifacts-cache slot in the
+    // marker; omitting it (null) leaves any previously-recorded pin alone
+    // (injectSpmIntoExistingXcodeproj preserves it — see
+    // generate-spm-xcodeproj.js).
+    artifactsVersionOverride: args.version ?? null,
   });
   if (result.status !== 'injected') {
     logError(`SPM injection failed: ${result.reason}`);
@@ -901,28 +906,6 @@ async function setupXcodeproj(
         '(unused; React Native uses Hermes).',
     );
   }
-}
-
-// Returns the `*.xcodeproj` carrying a `.spm-injected.json` marker (the
-// user-owned project SPM packages were injected into in place), else null.
-function findInjectedXcodeproj(appRoot /*: string */) /*: string | null */ {
-  let entries /*: Array<{name: string, isDirectory(): boolean}> */;
-  try {
-    // $FlowFixMe[incompatible-type] Dirent typing
-    entries = fs.readdirSync(appRoot, {withFileTypes: true});
-  } catch {
-    return null;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
-    const name /*: string */ = entry.name;
-    if (!name.endsWith('.xcodeproj')) continue;
-    if (fs.existsSync(path.join(appRoot, name, SPM_INJECTED_MARKER))) {
-      return path.join(appRoot, name);
-    }
-  }
-  return null;
 }
 
 // True when `git status --porcelain` reports the path dirty/untracked. Returns

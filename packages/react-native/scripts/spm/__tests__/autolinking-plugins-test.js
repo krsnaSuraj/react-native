@@ -307,4 +307,64 @@ describe('invokePlugins', () => {
       true,
     );
   });
+
+  it('keeps valid absolute watchPaths (dirs or files) across plugins', () => {
+    const res = invokePlugins(
+      [
+        mk('expo', () => ({
+          watchPaths: [
+            '/app/node_modules/expo/Package.swift',
+            '/app/node_modules/expo/expo-module.config.json',
+          ],
+        })),
+        mk('b', () => ({watchPaths: ['/app/node_modules/b']})),
+      ],
+      ctx,
+    );
+    expect(res.watchPaths).toEqual([
+      '/app/node_modules/expo/Package.swift',
+      '/app/node_modules/expo/expo-module.config.json',
+      '/app/node_modules/b',
+    ]);
+  });
+
+  it('defaults watchPaths to [] when no plugin declares any', () => {
+    const res = invokePlugins([mk('a', () => ({}))], ctx);
+    expect(res.watchPaths).toEqual([]);
+  });
+
+  it('drops relative / empty / non-string watchPaths with a per-entry warning', () => {
+    const warnings = [];
+    const res = invokePlugins(
+      [
+        mk('expo', () => ({
+          watchPaths: [
+            '/app/node_modules/expo/Package.swift', // kept
+            'relative/Package.swift', // relative → dropped
+            '', // empty → dropped
+            42, // non-string → dropped
+          ],
+        })),
+      ],
+      ctx,
+      {warn: m => warnings.push(m)},
+    );
+    expect(res.watchPaths).toEqual(['/app/node_modules/expo/Package.swift']);
+    expect(warnings).toHaveLength(3);
+    expect(warnings.every(w => /invalid watchPath/.test(w))).toBe(true);
+  });
+
+  it('ignores a non-array watchPaths with a warning (never throws)', () => {
+    const warnings = [];
+    let res;
+    expect(() => {
+      res = invokePlugins(
+        [mk('expo', () => ({watchPaths: '/app/x'}))], // string, not array
+        ctx,
+        {warn: m => warnings.push(m)},
+      );
+    }).not.toThrow();
+    expect(res.watchPaths).toEqual([]);
+    expect(warnings.some(w => /non-array watchPaths/.test(w))).toBe(true);
+  });
 });

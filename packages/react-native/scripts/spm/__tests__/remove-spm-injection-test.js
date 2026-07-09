@@ -13,6 +13,7 @@
 const {
   SPM_INJECTED_MARKER,
   injectSpmIntoExistingXcodeproj,
+  readArtifactsVersionOverride,
   removeSpmInjection,
 } = require('../generate-spm-xcodeproj');
 const fs = require('fs');
@@ -261,5 +262,117 @@ describe('generated-sources reconciliation on update', () => {
     const after = pbxprojOf(xcodeprojPath);
     expect(after).not.toContain('SPM Generated Sources');
     expect(readMarker(xcodeprojPath).generatedSources).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// artifactsVersionOverride — the marker field persisting an explicit
+// `spm add/update --version <ver>` pin (see setup-apple-spm.js /
+// sync-spm-autolinking.js). SETS on an explicit override; PRESERVES a
+// previously-recorded value when the caller omits one; deinit drops it along
+// with the rest of the marker.
+// ---------------------------------------------------------------------------
+describe('artifactsVersionOverride marker field', () => {
+  it('records an explicit override into the marker', () => {
+    const {appRoot, xcodeprojPath, rnRoot} = scaffoldApp();
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+      artifactsVersionOverride: '0.80.0',
+    });
+    expect(readMarker(xcodeprojPath).artifactsVersionOverride).toBe('0.80.0');
+    expect(readArtifactsVersionOverride(appRoot)).toBe('0.80.0');
+  });
+
+  it('defaults to null when no --version override has ever been given', () => {
+    const {appRoot, xcodeprojPath, rnRoot} = scaffoldApp();
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+    });
+    expect(readMarker(xcodeprojPath).artifactsVersionOverride).toBeNull();
+    expect(readArtifactsVersionOverride(appRoot)).toBeNull();
+  });
+
+  it('preserves a previously-recorded override on a later run without --version', () => {
+    const {appRoot, xcodeprojPath, rnRoot} = scaffoldApp();
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+      artifactsVersionOverride: '0.80.0',
+    });
+    // A later `update` (no --version) must not erase the pin.
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+    });
+    expect(readMarker(xcodeprojPath).artifactsVersionOverride).toBe('0.80.0');
+    expect(readArtifactsVersionOverride(appRoot)).toBe('0.80.0');
+  });
+
+  it('a later explicit --version overwrites the previous pin', () => {
+    const {appRoot, xcodeprojPath, rnRoot} = scaffoldApp();
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+      artifactsVersionOverride: '0.80.0',
+    });
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+      artifactsVersionOverride: '0.81.0',
+    });
+    expect(readMarker(xcodeprojPath).artifactsVersionOverride).toBe('0.81.0');
+    expect(readArtifactsVersionOverride(appRoot)).toBe('0.81.0');
+  });
+
+  it('deinit drops the override along with the whole marker (no clear verb yet)', () => {
+    const {appRoot, xcodeprojPath, rnRoot} = scaffoldApp();
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+      artifactsVersionOverride: '0.80.0',
+    });
+    removeSpmInjection({appRoot, xcodeprojPath});
+    expect(fs.existsSync(path.join(xcodeprojPath, SPM_INJECTED_MARKER))).toBe(
+      false,
+    );
+    expect(readArtifactsVersionOverride(appRoot)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readArtifactsVersionOverride — pure fs read, used by the build-time sync
+// (sync-spm-autolinking.js) to prefer a pinned version over the one derived
+// from node_modules/react-native/package.json.
+// ---------------------------------------------------------------------------
+describe('readArtifactsVersionOverride', () => {
+  it('returns null when no xcodeproj has been injected yet', () => {
+    const {appRoot} = scaffoldApp();
+    expect(readArtifactsVersionOverride(appRoot)).toBeNull();
+  });
+
+  it('returns null (never throws) on a malformed marker', () => {
+    const {appRoot, xcodeprojPath, rnRoot} = scaffoldApp();
+    injectSpmIntoExistingXcodeproj({
+      appRoot,
+      reactNativeRoot: rnRoot,
+      xcodeprojPath,
+      artifactsVersionOverride: '0.80.0',
+    });
+    fs.writeFileSync(
+      path.join(xcodeprojPath, SPM_INJECTED_MARKER),
+      '{ not valid json',
+      'utf8',
+    );
+    expect(() => readArtifactsVersionOverride(appRoot)).not.toThrow();
+    expect(readArtifactsVersionOverride(appRoot)).toBeNull();
   });
 });

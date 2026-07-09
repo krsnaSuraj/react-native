@@ -92,6 +92,12 @@ module.exports = function plugin(context) {
         },
       },
     ],
+    watchPaths: [
+      // Inputs whose edits must re-trigger the auto-sync — the plugin's own
+      // manifest and per-module config (absolute paths, dirs or files):
+      '/…/node_modules/expo/Package.swift',
+      '/…/node_modules/expo/expo-module.config.json',
+    ],
   };
 };
 ```
@@ -118,6 +124,23 @@ stale entries) and consumed by the build-time `swap-flavor` pass, which repoints
 plugin links in the same pass as RN's own frameworks. Because that repoint runs
 in the scheme pre-action, plugin artifacts inherit graph-time embed correctness
 for free — no plugin-side swap script needed.
+
+#### `watchPaths` — plugin staleness inputs
+
+`watchPaths` is an array of **absolute** paths (dirs **or** files) the Xcode
+auto-sync build phase watches to decide whether it must re-sync. RN already
+watches each module's source dir plus every npm dep's checked-in `Package.swift`
+and `.react-native/` dir; a plugin adds the inputs only it knows about — e.g.
+`packages/expo/Package.swift`, `expo-module.config.json`, and per-module
+manifests. On the next build the phase re-syncs when a watched **file** is newer
+than the last sync, a watched **dir** has a newer child, or a watched path has
+**vanished** (a rename forces a re-sync so the config error surfaces).
+
+Validation mirrors `flavoredArtifacts`: a non-array is ignored with a warning
+(never fatal), and each non-string / empty / **relative** entry is dropped with a
+warning. Absolute-only, because the generated phase tests these paths with no cwd
+context. The kept paths are folded into `<outputDir>/.spm-sync-watch-paths`
+alongside RN's own, then deduped and sorted.
 
 ### Context (input)
 

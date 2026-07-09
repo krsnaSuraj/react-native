@@ -560,10 +560,19 @@ function installSpmCodegenTemplate(
     'ios',
     'Package.swift',
   );
-  if (
-    !fs.existsSync(spmTemplate) ||
-    !fs.existsSync(path.dirname(codegenPkgSwift))
-  ) {
+  if (!fs.existsSync(path.dirname(codegenPkgSwift))) {
+    // Codegen hasn't produced build/generated/ios yet — normal, nothing to do.
+    return;
+  }
+  if (!fs.existsSync(spmTemplate)) {
+    // Abnormal: the react-native package is missing its SPM codegen template.
+    // Without it, codegen's default mis-rooted Package.swift stays in place
+    // and every subsequent Resolve Package Graph fails — say so loudly.
+    logger.log(
+      `warning: SPM codegen template missing at ${spmTemplate} — ` +
+        'build/generated/ios/Package.swift was NOT corrected and package ' +
+        'resolution will likely fail. Is the react-native package complete?',
+    );
     return;
   }
   let content = fs.readFileSync(spmTemplate, 'utf8');

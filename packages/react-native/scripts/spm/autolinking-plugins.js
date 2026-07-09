@@ -63,6 +63,13 @@
  *         // RN's build-time swap-flavor repoints it per $CONFIGURATION. Recorded
  *         // to `.spm-plugin-flavored-artifacts.json` and consumed there.
  *         flavoredArtifacts: [{name, link, flavors: {debug?, release?}}],
+ *         // Absolute paths (dirs OR files) the Xcode auto-sync build phase
+ *         // should watch for staleness — e.g. the plugin dep's own
+ *         // `Package.swift`, `expo-module.config.json`, and per-module
+ *         // manifests. Folded into `.spm-sync-watch-paths`; a file edit or a
+ *         // dir add/remove there re-triggers the sync. Relative/empty/non-string
+ *         // entries are dropped with a warning; a non-array is ignored.
+ *         watchPaths: ['/abs/path/Package.swift', '/abs/dir'],
  *       };
  *     };
  *
@@ -162,6 +169,7 @@ function invokePlugins(
   const generatedSources /*: Array<{path: string}> */ = [];
   const flavoredArtifacts /*: Array<{name: string, link: string, flavors: {debug?: string, release?: string}}> */ =
     [];
+  const watchPaths /*: Array<string> */ = [];
   const seenPackages /*: Set<string> */ = new Set();
   const seenProducts /*: Set<string> */ = new Set();
   const seenArtifacts /*: Set<string> */ = new Set();
@@ -193,6 +201,8 @@ function invokePlugins(
     const srcs = result.generatedSources ?? [];
     // $FlowFixMe[incompatible-use]
     const rawArts = result.flavoredArtifacts ?? [];
+    // $FlowFixMe[incompatible-use]
+    const rawWatch = result.watchPaths ?? [];
     // Never let a malformed flavoredArtifacts break the build — a non-array
     // (e.g. an object) would make the drop-loop below throw. Warn and ignore.
     if (!Array.isArray(rawArts)) {
@@ -202,6 +212,15 @@ function invokePlugins(
       );
     }
     const arts = Array.isArray(rawArts) ? rawArts : [];
+    // Same as flavoredArtifacts: watch paths are best-effort staleness hints, so
+    // a non-array is ignored (warn, never fatal).
+    if (!Array.isArray(rawWatch)) {
+      logger.warn(
+        `react-native spm: '${depName}' returned a non-array watchPaths ` +
+          `— ignoring it.`,
+      );
+    }
+    const watch = Array.isArray(rawWatch) ? rawWatch : [];
     for (const p of pkgs) {
       if (p == null || typeof p.name !== 'string') {
         throw new Error(
@@ -276,6 +295,20 @@ function invokePlugins(
       seenArtifacts.add(a.name);
       flavoredArtifacts.push({name: a.name, link: a.link, flavors: a.flavors});
     }
+    // watchPaths are DROPPED (with a warning), not fatal — like flavoredArtifacts,
+    // they're an optional capability. A non-string, empty, or relative entry only
+    // means one staleness input is missed, not a broken build. Absolute-only so
+    // the generated phase (which has no cwd context) can test them directly.
+    for (const w of watch) {
+      if (typeof w !== 'string' || w.length === 0 || !path.isAbsolute(w)) {
+        logger.warn(
+          `react-native spm: '${depName}' returned an invalid watchPath ` +
+            `(need a non-empty absolute path string) — dropping it.`,
+        );
+        continue;
+      }
+      watchPaths.push(w);
+    }
   }
 
   return {
@@ -283,6 +316,7 @@ function invokePlugins(
     productDependencies,
     generatedSources,
     flavoredArtifacts,
+    watchPaths,
   };
 }
 

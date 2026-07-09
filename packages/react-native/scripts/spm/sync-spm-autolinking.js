@@ -42,6 +42,7 @@ const {
 } = require('./download-spm-artifacts');
 const {main: generateAutolinking} = require('./generate-spm-autolinking');
 const {main: generatePackage} = require('./generate-spm-package');
+const {readArtifactsVersionOverride} = require('./generate-spm-xcodeproj');
 const {
   RemoteVersionError,
   buildPerAppHeaderTree,
@@ -124,6 +125,7 @@ const defaultDeps = {
   buildPerAppHeaderTree,
   findProjectRoot,
   deriveFlavorFromPin,
+  readArtifactsVersionOverride,
 };
 
 async function main(
@@ -176,7 +178,19 @@ async function main(
   deps.installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
 
   const pkg = deps.readPackageJson(reactNativeRoot);
-  const rawVersion = pkg?.version ?? '0.0.0';
+  // An explicit `spm add/update --version <ver>` pins the artifacts-cache slot
+  // into the injected xcodeproj's `.spm-injected.json` marker
+  // (artifactsVersionOverride — see generate-spm-xcodeproj.js). Prefer that
+  // pin over the version derived from node_modules/react-native/package.json,
+  // so a version-mismatched setup (app package version != artifact label)
+  // keeps healing against the SAME slot `add`/`update` selected.
+  const artifactsVersionOverride = deps.readArtifactsVersionOverride(appRoot);
+  const rawVersion = artifactsVersionOverride ?? pkg?.version ?? '0.0.0';
+  if (artifactsVersionOverride != null) {
+    log(
+      `Using pinned artifacts version ${artifactsVersionOverride} (from .spm-injected.json)`,
+    );
+  }
   // Preserve the flavor this app was pinned to (Release-pinned apps must not be
   // stomped back to debug by a sync) — the build-time swap-flavor still flips
   // the embedded/linked flavor per $CONFIGURATION on top of this.

@@ -16,6 +16,10 @@ const {
   buildSyncAutolinkingScript,
   generateXcscheme,
 } = require('../generate-spm-xcodeproj');
+const {execFileSync} = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 // ---------------------------------------------------------------------------
 // generateXcscheme — pre-action for SPM autolinking sync
@@ -278,6 +282,23 @@ describe('buildSyncAutolinkingScript', () => {
     );
   });
 
+  it('watches mixed dirs and files, treating a vanished path as stale', () => {
+    // Dir branch: -newer catches add/remove of source children.
+    expect(script).toContain('if [ -d "$P" ]; then');
+    expect(script).toContain(
+      'if [ -n "$(find "$P" -newer "$STAMP" -print -quit 2>/dev/null)" ]; then',
+    );
+    // File branch: a dep manifest / plugin file edit does not bump any dir mtime.
+    expect(script).toContain('elif [ -f "$P" ]; then');
+    expect(script).toContain('if [ "$P" -nt "$STAMP" ]; then');
+    // Vanish branch: neither dir nor file → forced re-sync (real error surfaces).
+    expect(script).toContain('else\n      STALE=1\n      break\n    fi');
+    // Reads the same mixed watch file the autolinker emits.
+    expect(script).toContain(
+      'WATCH_FILE="$SRCROOT/build/generated/autolinking/.spm-sync-watch-paths"',
+    );
+  });
+
   it('is POSIX-sh clean: no bashisms ([[ ) in the generated script', () => {
     expect(script).not.toContain('[[');
   });
@@ -289,6 +310,104 @@ describe('buildSyncAutolinkingScript', () => {
     expect(buildSyncAutolinkingScript(BAKED)).toBe(
       buildSyncAutolinkingScript(BAKED),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Behavioral: drive the EXACT generated watch-paths stale loop under /bin/sh
+// against fabricated STAMP + watch file fixtures. Uses fs.utimesSync for
+// deterministic mtimes (no sleeps). `find`, `[ -d ]`, `[ -nt ]` are real — no
+// mocking needed for this pure-shell region.
+// ---------------------------------------------------------------------------
+describe('buildSyncAutolinkingScript watch-paths stale loop (behavioral)', () => {
+  const script = buildSyncAutolinkingScript('../node_modules/react-native');
+
+  // Extract the real generated loop so the test can never drift from the source.
+  const loopStart = script.indexOf('while IFS= read -r P; do');
+  const endMarker = 'done < "$WATCH_FILE"';
+  const loopEnd = script.indexOf(endMarker, loopStart) + endMarker.length;
+  const staleLoop = script.slice(loopStart, loopEnd);
+
+  const STAMP_T = 1600000000; // seconds
+  const NEWER = STAMP_T + 100;
+  const OLDER = STAMP_T - 100;
+
+  let tmp;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-watch-'));
+  });
+  afterEach(() => {
+    fs.rmSync(tmp, {recursive: true, force: true});
+  });
+
+  // Runs the extracted loop with a STAMP at STAMP_T and the given watch lines.
+  function runStale(watchLines) {
+    const stamp = path.join(tmp, '.spm-sync-stamp');
+    fs.writeFileSync(stamp, '');
+    fs.utimesSync(stamp, STAMP_T, STAMP_T);
+    const watch = path.join(tmp, 'watch');
+    fs.writeFileSync(watch, watchLines.join('\n') + '\n');
+    const harness = [
+      'set -eu',
+      `STAMP="${stamp}"`,
+      `WATCH_FILE="${watch}"`,
+      'STALE=0',
+      staleLoop,
+      'echo "$STALE"',
+    ].join('\n');
+    return execFileSync('/bin/sh', ['-c', harness], {encoding: 'utf8'}).trim();
+  }
+
+  it('is stale when a watched FILE is newer than the stamp', () => {
+    const f = path.join(tmp, 'Package.swift');
+    fs.writeFileSync(f, '');
+    fs.utimesSync(f, NEWER, NEWER);
+    expect(runStale([f])).toBe('1');
+  });
+
+  it('is NOT stale when a watched file is older than the stamp', () => {
+    const f = path.join(tmp, 'Package.swift');
+    fs.writeFileSync(f, '');
+    fs.utimesSync(f, OLDER, OLDER);
+    expect(runStale([f])).toBe('0');
+  });
+
+  it('is stale when a watched DIR has a child newer than the stamp', () => {
+    const d = path.join(tmp, 'src');
+    fs.mkdirSync(d);
+    const child = path.join(d, 'New.swift');
+    fs.writeFileSync(child, '');
+    fs.utimesSync(child, NEWER, NEWER);
+    fs.utimesSync(d, NEWER, NEWER);
+    expect(runStale([d])).toBe('1');
+  });
+
+  it('is NOT stale when a watched dir and all its children are older', () => {
+    const d = path.join(tmp, 'src');
+    fs.mkdirSync(d);
+    const child = path.join(d, 'Old.swift');
+    fs.writeFileSync(child, '');
+    fs.utimesSync(child, OLDER, OLDER);
+    fs.utimesSync(d, OLDER, OLDER);
+    expect(runStale([d])).toBe('0');
+  });
+
+  it('is stale when a watched path has VANISHED (rename/move)', () => {
+    expect(runStale([path.join(tmp, 'gone', 'Package.swift')])).toBe('1');
+  });
+
+  it('short-circuits on the first stale entry (mixed lines, blank tolerated)', () => {
+    const fresh = path.join(tmp, 'fresh.txt');
+    fs.writeFileSync(fresh, '');
+    fs.utimesSync(fresh, OLDER, OLDER);
+    const gone = path.join(tmp, 'gone', 'x');
+    expect(runStale([fresh, '', gone])).toBe('1');
+  });
+
+  it('parses under `sh -n` (whole generated script is valid POSIX sh)', () => {
+    const file = path.join(tmp, 'phase.sh');
+    fs.writeFileSync(file, script);
+    expect(() => execFileSync('/bin/sh', ['-n', file])).not.toThrow();
   });
 });
 

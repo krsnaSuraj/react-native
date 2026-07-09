@@ -104,6 +104,11 @@ export type TargetEntry = {
   // missing-manifest error so the message names the package the developer
   // installed, not its derived Swift target name.
   npmName?: string,
+  // The dep's checked-in package root (origin 'npm' only) — the directory that
+  // holds its root `Package.swift` and `.react-native/` metadata. Threaded from
+  // the autolinking model (`dep.root`) so the watch file can flag manifest edits
+  // without walking up from the (possibly nested) target source dir.
+  root?: string,
   // Filled in for npm-origin entries during the mirror step; consumed by the
   // synth-package emission step further down.
   mirrorReady?: ?{
@@ -269,6 +274,10 @@ export type PluginResult = {
   productDependencies: Array<PluginProductDep>,
   generatedSources: Array<PluginGeneratedSource>,
   flavoredArtifacts: Array<PluginFlavoredArtifact>,
+  // Absolute paths (dirs or files) the Xcode auto-sync build phase should watch
+  // for staleness, e.g. the plugin dep's own `Package.swift` and per-module
+  // manifests. Folded into `.spm-sync-watch-paths` by main().
+  watchPaths: Array<string>,
 };
 
 export type SpmAutolinkingPlugin = (context: PluginContext) => ?{
@@ -276,6 +285,7 @@ export type SpmAutolinkingPlugin = (context: PluginContext) => ?{
   productDependencies?: Array<PluginProductDep>,
   generatedSources?: Array<PluginGeneratedSource>,
   flavoredArtifacts?: Array<PluginFlavoredArtifact>,
+  watchPaths?: Array<string>,
 };
 
 export type DiscoveredPlugin = {

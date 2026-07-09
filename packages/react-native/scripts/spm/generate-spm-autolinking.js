@@ -1307,7 +1307,12 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
         swiftNameByNpm,
       );
       if (target != null) {
-        entries.push({target, origin: 'npm', npmName: dep.name});
+        entries.push({
+          target,
+          origin: 'npm',
+          npmName: dep.name,
+          root: dep.root,
+        });
         log(`Found npm native module: ${target.name} → ${target.path}`);
       }
     }
@@ -1686,6 +1691,7 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   let pluginProductDeps /*: Array<PluginProductDep> */ = [];
   let pluginGeneratedSources /*: Array<{path: string}> */ = [];
   let pluginFlavoredArtifacts /*: Array<PluginFlavoredArtifact> */ = [];
+  let pluginWatchPaths /*: Array<string> */ = [];
   if (discoveredPlugins.length > 0) {
     // React-GeneratedCode is the per-app codegen package (referenced as
     // `../ios` from outputDir). It may be absent (no codegen this run), so the
@@ -1714,6 +1720,7 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     pluginProductDeps = result.productDependencies;
     pluginGeneratedSources = result.generatedSources;
     pluginFlavoredArtifacts = result.flavoredArtifacts;
+    pluginWatchPaths = result.watchPaths;
     log(
       `SPM plugins contributed ${pluginPackageDeps.length} package(s), ` +
         `${pluginProductDeps.length} product(s), ` +
@@ -1758,12 +1765,34 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   fs.writeFileSync(outputPath, aggregatorContent, 'utf8');
   log(`Generated: ${path.relative(appRoot, outputPath)}`);
 
-  // .spm-sync-watch-paths: absolute paths the Xcode auto-sync build phase
-  // should watch for add/remove of native source files. Updating the dir
-  // mtime via touch/rm of a child file is enough to invalidate the stamp,
-  // so the sync re-runs and the `sources:` allowlist is regenerated.
-  // Each module's source dir is already known via entryAbsDirs.
-  const watchPaths = Array.from(new Set(entryAbsDirs.values()))
+  // .spm-sync-watch-paths: absolute paths (dirs OR files) the Xcode auto-sync
+  // build phase watches for staleness. Three kinds of input, mixed freely:
+  //   1. Each module's source dir (entryAbsDirs) — a dir; adding/removing a
+  //      child bumps its mtime so `find -newer` trips and the `sources:`
+  //      allowlist regenerates.
+  //   2. Each npm dep's checked-in root `Package.swift` (a file) and its
+  //      `.react-native/` metadata dir. Editing a manifest does NOT bump the
+  //      source dir's mtime, so without these a manifest edit stays silently
+  //      stale until an unrelated install triggers a sync. The dep ROOT is
+  //      threaded through the entry (entry.root, from the autolinking model),
+  //      not derived by walking up from the (possibly nested) source dir.
+  //   3. Plugin-contributed paths (e.g. Expo's own Package.swift / per-module
+  //      manifests) — already validated absolute in invokePlugins.
+  // The phase distinguishes dir vs file with `-d`/`-f` at build time (no
+  // markers). The existsSync filter here is safe: these paths come from a
+  // successful sync so they exist now; a path that later VANISHES is caught at
+  // phase time against this file and forces a re-sync.
+  const watchCandidates /*: Array<string> */ = [...entryAbsDirs.values()];
+  for (const entry of entries) {
+    const root = entry.root;
+    if (entry.origin !== 'npm' || root == null) {
+      continue;
+    }
+    watchCandidates.push(path.join(root, 'Package.swift'));
+    watchCandidates.push(path.join(root, '.react-native'));
+  }
+  watchCandidates.push(...pluginWatchPaths);
+  const watchPaths = Array.from(new Set(watchCandidates))
     .filter(p => p.length > 0 && fs.existsSync(p))
     .sort();
   fs.writeFileSync(

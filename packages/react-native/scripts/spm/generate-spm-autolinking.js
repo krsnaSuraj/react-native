@@ -1720,25 +1720,23 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
         `${pluginGeneratedSources.length} generated source(s), ` +
         `${pluginFlavoredArtifacts.length} flavored artifact(s)`,
     );
-    // Generated-source registration (e.g. Expo's ExpoModulesProvider.swift) is
-    // consumed by the codegen step via this manifest — the provider ordering
-    // contract is still Preview and co-designed with the first consumer.
-    if (pluginGeneratedSources.length > 0) {
-      fs.writeFileSync(
-        path.join(outputDir, '.spm-plugin-generated-sources.json'),
-        JSON.stringify(pluginGeneratedSources, null, 2) + '\n',
-        'utf8',
-      );
-    }
   }
 
-  // Flavored-artifact sidecar for the build-time swap-flavor pass. ALWAYS
-  // written — even `[]` — so removing a plugin (or dropping its declaration)
-  // clears stale entries and swap-flavor stops repointing a now-gone link. This
-  // differs from the generated-sources sidecar above (written only when
-  // non-empty) by design. Machine-local absolute paths; gitignored + regenerated
-  // every sync, same as the other sidecars.
+  // Plugin sidecars. Both are ALWAYS written — even `[]` — so removing a
+  // plugin (or dropping its declaration) clears stale entries: the injector's
+  // generated-source reconciliation retires pbxproj entries, and swap-flavor
+  // stops repointing a now-gone link. Machine-local absolute paths; gitignored
+  // + regenerated every sync, same as the other sidecars.
   fs.mkdirSync(outputDir, {recursive: true});
+  // Generated-source registration (e.g. Expo's ExpoModulesProvider.swift),
+  // consumed by the injector at add/update time — the provider ordering
+  // contract is still Preview and co-designed with the first consumer.
+  fs.writeFileSync(
+    path.join(outputDir, '.spm-plugin-generated-sources.json'),
+    JSON.stringify(pluginGeneratedSources, null, 2) + '\n',
+    'utf8',
+  );
+  // Flavored-artifact sidecar for the build-time swap-flavor pass.
   fs.writeFileSync(
     path.join(outputDir, '.spm-plugin-flavored-artifacts.json'),
     JSON.stringify(pluginFlavoredArtifacts, null, 2) + '\n',

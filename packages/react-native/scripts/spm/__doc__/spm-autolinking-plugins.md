@@ -207,10 +207,24 @@ message identifying the framework. A framework silently dropping its modules
 - **Implemented & tested:** discovery (transitive + deny-list), invocation,
   package + product merge, `flavor` in context, fail-closed, dedupe,
   `flavoredArtifacts` merge + record + build-time swap (repoint & rsync).
-- **Co-design with Expo (not final):** `generatedSources` is captured
-  (written to `.spm-plugin-generated-sources.json`) but its codegen
-  registration + **provider ordering** — codegen must consume the same
-  discovered module set the plugin contributes — is intentionally left for the
-  first real plugin to drive to a stable shape.
+- **Implemented & tested:** `generatedSources` **app-target wiring**. The
+  merge writes `.spm-plugin-generated-sources.json`; the `spm add`/`update`
+  xcodeproj injector (generate-spm-xcodeproj.js) reads it and wires each source
+  **into the app target** — a `PBXFileReference` + `PBXBuildFile` + a
+  Sources-build-phase entry, parented under one "SPM Generated Sources"
+  navigator group. This is what makes an `@objc` class (e.g. Expo's
+  `ExpoModulesProvider`) reach the ObjC classlist: a class inside the static
+  Autolinked aggregate never does, so `NSClassFromString` discovery would fail.
+  Paths are stored SRCROOT-relative when under the app root (the usual
+  `build/generated/…` case), else absolute (`sourceTree = "<absolute>"`). All
+  UUIDs are namespaced on the normalized path (deterministic/idempotent) and
+  recorded in the `.spm-injected.json` marker's `generatedSources` map, so
+  `deinit` reverts them and `update` reconciles entries that left the manifest.
+  A target without a Sources phase logs loudly and skips the wiring (injection
+  otherwise succeeds). v1 targets only the injected app target and assumes
+  `.swift` in practice (`.m`/`.mm` are mapped as future-proofing).
+- **Co-design with Expo (not final):** codegen **provider ordering** — codegen
+  must consume the same discovered module set the plugin contributes — is
+  intentionally left for the first real plugin to drive to a stable shape.
 - Contract to be ratified via RFC once Expo's plugin proves it (framed as a
   generic hook, not Expo-specific code in RN).

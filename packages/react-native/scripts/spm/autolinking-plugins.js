@@ -49,6 +49,14 @@
  *       return {
  *         packageDependencies: [{name, path}] | [{name, url, version}],
  *         productDependencies: [{name, package}],
+ *         // Sources compiled INTO THE APP TARGET (not the static Autolinked
+ *         // aggregate) — the only place an @objc class reaches the ObjC
+ *         // classlist, so emit files here when a class must be reachable by
+ *         // name (e.g. via NSClassFromString), as Expo's ExpoModulesProvider
+ *         // needs. Recorded to `.spm-plugin-generated-sources.json`; the
+ *         // `spm add`/`update` xcodeproj injector wires each into the app
+ *         // target (PBXFileReference + Sources-phase entry), marker-tracked
+ *         // so deinit reverts and update reconciles.
  *         generatedSources: [{path}],
  *         // Precompiled xcframeworks that come in debug/release flavor pairs.
  *         // `link` is a plugin-owned stable symlink its binaryTarget references;

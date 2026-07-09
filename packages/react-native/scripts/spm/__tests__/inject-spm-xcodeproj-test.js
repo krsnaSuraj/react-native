@@ -36,7 +36,12 @@ const RN_PATH = '../node_modules/react-native';
 const TEST_HERMES_CLI_PATH =
   '/abs/node_modules/hermes-compiler/hermesc/osx-bin/hermesc';
 
-function inject(text, remote = null, hermesCliPath = TEST_HERMES_CLI_PATH) {
+function inject(
+  text,
+  remote = null,
+  hermesCliPath = TEST_HERMES_CLI_PATH,
+  generatedSources = [],
+) {
   const plan = planInjection(text, {});
   expect(plan.ok).toBe(true);
   return injectSpmIntoPbxproj(
@@ -46,12 +51,24 @@ function inject(text, remote = null, hermesCliPath = TEST_HERMES_CLI_PATH) {
       targetUuid: plan.target.uuid,
       configUuids: plan.configUuids,
       frameworksPhaseUuid: plan.frameworksPhaseUuid,
+      sourcesPhaseUuid: plan.sourcesPhaseUuid,
     },
     RN_PATH,
     remote,
     hermesCliPath,
+    generatedSources,
   );
 }
+
+// A normalized generated source under the app root (the Expo case:
+// build/generated/autolinking/expo/ExpoModulesProvider.swift). `path` is
+// SRCROOT-relative, so `sourceTree = SOURCE_ROOT`.
+const PROVIDER_SOURCE = {
+  path: 'build/generated/autolinking/expo/ExpoModulesProvider.swift',
+  name: 'ExpoModulesProvider.swift',
+  sourceTree: 'SOURCE_ROOT',
+  fileType: 'sourcecode.swift',
+};
 
 // A simple balanced-delimiter check (the injected file must stay well-formed).
 function isBalanced(text) {
@@ -80,6 +97,8 @@ describe('planInjection', () => {
     expect(plan.target.name).toBe('MyApp');
     expect(plan.configUuids).toHaveLength(2); // Debug + Release
     expect(plan.frameworksPhaseUuid).toMatch(/^[0-9A-Fa-f]{24}$/);
+    // Also resolves the Sources phase (generated sources compile into it).
+    expect(plan.sourcesPhaseUuid).toMatch(/^[0-9A-Fa-f]{24}$/);
   });
 
   it('refuses a CocoaPods-integrated target (fail-closed for fallback)', () => {
@@ -187,6 +206,118 @@ describe('injectSpmIntoPbxproj — Tier 2 (build settings + phase)', () => {
     // Runs after Sources (post-embed).
     const fixIdx = text.indexOf('Fix SPM Embedded Flavor */,');
     expect(fixIdx).toBeGreaterThan(text.indexOf('Sources */,'));
+  });
+});
+
+describe('injectSpmIntoPbxproj — Tier 3 (plugin generated sources)', () => {
+  it('wires a manifest entry into the app target (ref + build file + Sources + group)', () => {
+    const {text, generatedSourceUuids} = inject(PLAIN, null, null, [
+      PROVIDER_SOURCE,
+    ]);
+    const [fileRefUuid, buildFileUuid] =
+      generatedSourceUuids[PROVIDER_SOURCE.path];
+    expect(fileRefUuid).toMatch(/^[0-9A-F]{24}$/);
+    expect(buildFileUuid).toMatch(/^[0-9A-F]{24}$/);
+
+    // PBXFileReference with the SRCROOT-relative path + SOURCE_ROOT tree.
+    expect(text).toContain(`${fileRefUuid} /* ExpoModulesProvider.swift */`);
+    expect(text).toContain('lastKnownFileType = sourcecode.swift');
+    expect(text).toContain(`path = ${PROVIDER_SOURCE.path};`);
+    expect(text).toContain('sourceTree = SOURCE_ROOT;');
+
+    // PBXBuildFile → the file ref, and a Sources-phase membership.
+    expect(text).toContain(
+      `${buildFileUuid} /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = ${fileRefUuid} /* ExpoModulesProvider.swift */;};`,
+    );
+    // The build file is a member of the Sources phase (compiled into the app).
+    const sourcesPhase = text.slice(
+      text.indexOf('/* Begin PBXSourcesBuildPhase section */'),
+    );
+    expect(sourcesPhase.slice(0, sourcesPhase.indexOf('/* End'))).toContain(
+      `${buildFileUuid} /* ExpoModulesProvider.swift in Sources */,`,
+    );
+
+    // The single "SPM Generated Sources" group, parented and holding the ref.
+    expect(text).toContain('/* SPM Generated Sources */ = {');
+    expect(text).toContain('isa = PBXGroup;');
+    const groupBlock = text.slice(
+      text.indexOf('/* SPM Generated Sources */ = {'),
+    );
+    expect(groupBlock.slice(0, groupBlock.indexOf('};'))).toContain(
+      `${fileRefUuid} /* ExpoModulesProvider.swift */,`,
+    );
+    // File ref + build file UUIDs are tracked for deinit.
+    const {injectedUuids} = inject(PLAIN, null, null, [PROVIDER_SOURCE]);
+    expect(injectedUuids).toEqual(
+      expect.arrayContaining([fileRefUuid, buildFileUuid]),
+    );
+    expect(isBalanced(text)).toBe(true);
+  });
+
+  it('is idempotent with generated sources — a second run is byte-for-byte identical', () => {
+    const first = inject(PLAIN, null, null, [PROVIDER_SOURCE]).text;
+    const plan = planInjection(first, {});
+    const second = injectSpmIntoPbxproj(
+      first,
+      {
+        rootUuid: plan.rootUuid,
+        targetUuid: plan.target.uuid,
+        configUuids: plan.configUuids,
+        frameworksPhaseUuid: plan.frameworksPhaseUuid,
+        sourcesPhaseUuid: plan.sourcesPhaseUuid,
+      },
+      RN_PATH,
+      null,
+      null,
+      [PROVIDER_SOURCE],
+    ).text;
+    expect(second).toBe(first);
+  });
+
+  it('stores an out-of-tree source as an absolute <absolute> reference', () => {
+    const abs = {
+      path: '/opt/generated/OtherProvider.swift',
+      name: 'OtherProvider.swift',
+      sourceTree: '"<absolute>"',
+      fileType: 'sourcecode.swift',
+    };
+    const {text} = inject(PLAIN, null, null, [abs]);
+    expect(text).toContain('path = /opt/generated/OtherProvider.swift;');
+    expect(text).toContain('sourceTree = "<absolute>";');
+  });
+
+  it('logs loudly and skips wiring when the target has no Sources phase', () => {
+    const noSources = PLAIN.replace(
+      /\/\* Begin PBXSourcesBuildPhase section \*\/[\s\S]*?\/\* End PBXSourcesBuildPhase section \*\/\n\n/,
+      '',
+    );
+    const plan = planInjection(noSources, {});
+    expect(plan.ok).toBe(true);
+    expect(plan.sourcesPhaseUuid).toBeNull();
+
+    const spy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const {text, generatedSourceUuids} = injectSpmIntoPbxproj(
+      noSources,
+      {
+        rootUuid: plan.rootUuid,
+        targetUuid: plan.target.uuid,
+        configUuids: plan.configUuids,
+        frameworksPhaseUuid: plan.frameworksPhaseUuid,
+        sourcesPhaseUuid: plan.sourcesPhaseUuid,
+      },
+      RN_PATH,
+      null,
+      null,
+      [PROVIDER_SOURCE],
+    );
+    const logged = spy.mock.calls.map(c => c[0]).join('\n');
+    spy.mockRestore();
+
+    expect(logged).toMatch(/no Sources build phase/);
+    // No generated source wired, but the SPM graph injection still happened.
+    expect(generatedSourceUuids).toEqual({});
+    expect(text).not.toContain('SPM Generated Sources');
+    expect(text).toContain('productName = ReactNative');
   });
 });
 

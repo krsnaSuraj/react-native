@@ -52,6 +52,34 @@ const {log} = makeLogger('generate-spm-xcodeproj');
 // (removeSpmInjection) can surgically revert and re-runs stay idempotent.
 const SPM_INJECTED_MARKER = '.spm-injected.json';
 
+// Manifest of plugin-contributed sources that must COMPILE INTO THE APP TARGET
+// (e.g. Expo's ExpoModulesProvider.swift — an `@objc` class only reaches the
+// ObjC classlist, and so is discoverable via NSClassFromString, when it
+// compiles into the app target, NOT the static Autolinked aggregate). Written
+// by generate-spm-autolinking.js (the plugin merge) BEFORE setupXcodeproj runs
+// on both `add` and `update`, so the injector reads it synchronously. Path is
+// relative to the app root (== SRCROOT / the .xcodeproj's dir).
+const SPM_GENERATED_SOURCES_MANIFEST = path.join(
+  'build',
+  'generated',
+  'autolinking',
+  '.spm-plugin-generated-sources.json',
+);
+
+// The single navigator group all injected generated sources are parented under
+// (created on first use). Its namespacedUUID id + display name.
+const SPM_GENERATED_SOURCES_GROUP_ID = 'SPMGeneratedSources';
+const SPM_GENERATED_SOURCES_GROUP_NAME = 'SPM Generated Sources';
+
+// pbxproj `lastKnownFileType` per source extension. v1 plugins emit Swift only;
+// .m/.mm are mapped as future-proofing (the plugin contract permits ObjC/ObjC++
+// sources). An unmapped extension is skipped with a loud log.
+const GENERATED_SOURCE_FILE_TYPES /*: {[string]: string} */ = {
+  '.swift': 'sourcecode.swift',
+  '.m': 'sourcecode.c.objc',
+  '.mm': 'sourcecode.cpp.objcpp',
+};
+
 // Maps each SPM product to its sub-package path (relative to app root).
 // The xcodeproj must reference each sub-package directly so Xcode can
 // resolve the product dependencies — SPM doesn't expose transitive products.
@@ -103,6 +131,10 @@ type BuildSettingChange = {
   // CocoaPods is deintegrated. Deinit restores the original.
   replacedScalars?: {[string]: string},
 };
+// A plugin-contributed source, normalized for pbxproj emission. `path` is
+// SRCROOT-relative when under the app root, else absolute; `sourceTree` is the
+// matching pbxproj token ('SOURCE_ROOT' or '"<absolute>"').
+type GeneratedSource = {path: string, name: string, sourceTree: string, fileType: string};
 type SpmGraph = {
   uniquePackages: Array<{packagePath: string, packageName: string}>,
   localPkgRefs: Array<{uuid: string, packagePath: string, comment: string}>,
@@ -824,7 +856,7 @@ function configUsesPods(
  * the caller surfaces (fail-loud).
  */
 function planInjection(text /*: string */, opts /*: {appName?: ?string} */) /*:
-  | {ok: true, rootUuid: string, target: {uuid: string, name: string, bodyOpen: number, bodyClose: number}, configUuids: Array<string>, frameworksPhaseUuid: string}
+  | {ok: true, rootUuid: string, target: {uuid: string, name: string, bodyOpen: number, bodyClose: number}, configUuids: Array<string>, frameworksPhaseUuid: string, sourcesPhaseUuid: ?string}
   | {ok: false, reason: string} */ {
   const project = findProjectObject(text);
   if (project == null) {
@@ -874,14 +906,29 @@ function planInjection(text /*: string */, opts /*: {appName?: ?string} */) /*:
       ? (buildPhases.value.match(/[0-9A-Fa-f]{24}/g) ?? [])
       : [];
   let frameworksPhaseUuid = null;
+  // Also capture the Sources phase — plugin generated sources compile into it
+  // (see injectSpmIntoPbxproj step 8). Nullable: a target may legitimately
+  // lack one, in which case generated-source wiring is skipped (not fatal).
+  let sourcesPhaseUuid = null;
   for (const pu of phaseUuids) {
     const po = findObjectByUuid(text, pu);
-    if (po != null) {
-      const isa = findField(text, po, 'isa');
-      if (isa != null && /PBXFrameworksBuildPhase/.test(isa.value)) {
-        frameworksPhaseUuid = pu;
-        break;
-      }
+    if (po == null) {
+      continue;
+    }
+    const isa = findField(text, po, 'isa');
+    if (isa == null) {
+      continue;
+    }
+    if (
+      frameworksPhaseUuid == null &&
+      /PBXFrameworksBuildPhase/.test(isa.value)
+    ) {
+      frameworksPhaseUuid = pu;
+    } else if (
+      sourcesPhaseUuid == null &&
+      /PBXSourcesBuildPhase/.test(isa.value)
+    ) {
+      sourcesPhaseUuid = pu;
     }
   }
   if (frameworksPhaseUuid == null) {
@@ -893,6 +940,7 @@ function planInjection(text /*: string */, opts /*: {appName?: ?string} */) /*:
     target,
     configUuids,
     frameworksPhaseUuid,
+    sourcesPhaseUuid,
   };
 }
 
@@ -904,11 +952,12 @@ function planInjection(text /*: string */, opts /*: {appName?: ?string} */) /*:
  */
 function injectSpmIntoPbxproj(
   input /*: string */,
-  plan /*: {rootUuid: string, targetUuid: string, configUuids: Array<string>, frameworksPhaseUuid: string} */,
+  plan /*: {rootUuid: string, targetUuid: string, configUuids: Array<string>, frameworksPhaseUuid: string, sourcesPhaseUuid?: ?string} */,
   reactNativePath /*: string */,
   remote /*: ?RemoteCfg */,
   hermesCliPath /*: ?string */ = null,
-) /*: {text: string, injectedUuids: Array<string>, createdArrayFields: Array<{container: 'project' | 'target', key: string}>, buildSettingChanges: Array<BuildSettingChange>} */ {
+  generatedSources /*: ReadonlyArray<GeneratedSource> */ = [],
+) /*: {text: string, injectedUuids: Array<string>, createdArrayFields: Array<{container: 'project' | 'target', key: string}>, buildSettingChanges: Array<BuildSettingChange>, generatedSourceUuids: {[string]: Array<string>}} */ {
   let text = input;
   const mkUuid = (section /*: string */, id /*: string */) =>
     namespacedUUID(plan.rootUuid, section, id);
@@ -1092,7 +1141,124 @@ function injectSpmIntoPbxproj(
     [{uuid: embeddedFixPhaseUuid, comment: 'Fix SPM Embedded Flavor'}],
   );
 
-  return {text, injectedUuids, createdArrayFields, buildSettingChanges};
+  // 8. Plugin generated sources compiled INTO THE APP TARGET (e.g. Expo's
+  //    ExpoModulesProvider.swift). An `@objc` class only reaches the ObjC
+  //    classlist — required for NSClassFromString discovery — when it compiles
+  //    into the app target, not the static Autolinked aggregate. Each source
+  //    gets a PBXFileReference + PBXBuildFile + a Sources-phase entry, parented
+  //    under a single "SPM Generated Sources" group. Every UUID is keyed on the
+  //    normalized path (deterministic → idempotent) and recorded so `deinit`
+  //    reverts it and `update` reconciles it (removal is done by the caller,
+  //    which owns the prior marker; emission here is purely additive).
+  const generatedSourceUuids /*: {[string]: Array<string>} */ = {};
+  const sourcesPhaseUuid = plan.sourcesPhaseUuid;
+  if (generatedSources.length > 0) {
+    if (sourcesPhaseUuid == null) {
+      log(
+        'warning: the app target has no Sources build phase — cannot compile ' +
+          `${generatedSources.length} SPM plugin generated source(s) into the ` +
+          'app target; skipping. Any @objc classes they define will not be ' +
+          'discoverable via NSClassFromString.',
+      );
+    } else {
+      const fileRefs = [];
+      const buildFiles = [];
+      const sourcesMembers = [];
+      const groupChildren = [];
+      for (const src of generatedSources) {
+        const fileRefUuid = mkUuid('PBXFileReference', `gensrc:${src.path}`);
+        const buildFileUuid = mkUuid('PBXBuildFile', `gensrc:${src.path}`);
+        generatedSourceUuids[src.path] = [fileRefUuid, buildFileUuid];
+        fileRefs.push({
+          uuid: fileRefUuid,
+          comment: src.name,
+          fields: {
+            isa: 'PBXFileReference',
+            lastKnownFileType: src.fileType,
+            name: quoteIfNeeded(src.name),
+            path: quoteIfNeeded(src.path),
+            sourceTree: src.sourceTree,
+          },
+        });
+        buildFiles.push({
+          uuid: buildFileUuid,
+          comment: `${src.name} in Sources`,
+          fields: {
+            isa: 'PBXBuildFile',
+            fileRef: `${fileRefUuid} /* ${src.name} */`,
+          },
+        });
+        sourcesMembers.push({
+          uuid: buildFileUuid,
+          comment: `${src.name} in Sources`,
+        });
+        groupChildren.push({uuid: fileRefUuid, comment: src.name});
+      }
+      insertObjects('PBXFileReference', fileRefs);
+      insertObjects('PBXBuildFile', buildFiles);
+
+      // Compile membership — the actual reason these are wired into the app.
+      const sourcesPhase = findObjectByUuid(text, sourcesPhaseUuid);
+      if (sourcesPhase != null) {
+        text = addArrayMembers(text, sourcesPhase, 'files', sourcesMembers);
+      }
+
+      // The "SPM Generated Sources" group (created on first use, then reused).
+      // Insert with empty children so the ONE population path (addArrayMembers)
+      // handles both create and reconcile, keeping formatting identical.
+      const groupUuid = mkUuid('PBXGroup', SPM_GENERATED_SOURCES_GROUP_ID);
+      if (!text.includes(groupUuid)) {
+        text = insertObjectsIntoSection(
+          text,
+          'PBXGroup',
+          serializeEntry({
+            uuid: groupUuid,
+            comment: SPM_GENERATED_SOURCES_GROUP_NAME,
+            fields: {
+              isa: 'PBXGroup',
+              children: '(\n\t\t\t)',
+              name: quoteIfNeeded(SPM_GENERATED_SOURCES_GROUP_NAME),
+              sourceTree: '"<group>"',
+            },
+          }),
+        );
+      }
+      injectedUuids.push(groupUuid);
+      const groupObj = findObjectByUuid(text, groupUuid);
+      if (groupObj != null) {
+        text = addArrayMembers(text, groupObj, 'children', groupChildren);
+      }
+
+      // Parent the group under the project's main group (idempotent). Appends
+      // to a pre-existing children array, so no createdArrayField is recorded —
+      // deinit removes the group's membership via removeArrayMembersByUuid and
+      // the group object itself via removeObjectByUuid (groupUuid is injected).
+      const proj = findProjectObject(text);
+      const mainGroupField =
+        proj != null ? findField(text, proj, 'mainGroup') : null;
+      const mainGroupMatch =
+        mainGroupField != null
+          ? mainGroupField.value.match(/[0-9A-Fa-f]{24}/)
+          : null;
+      const mainGroupObj =
+        mainGroupMatch != null
+          ? findObjectByUuid(text, mainGroupMatch[0])
+          : null;
+      if (mainGroupObj != null) {
+        text = addArrayMembers(text, mainGroupObj, 'children', [
+          {uuid: groupUuid, comment: SPM_GENERATED_SOURCES_GROUP_NAME},
+        ]);
+      }
+    }
+  }
+
+  return {
+    text,
+    injectedUuids,
+    createdArrayFields,
+    buildSettingChanges,
+    generatedSourceUuids,
+  };
 }
 
 /** Re-locate an application target by UUID against the current text. */
@@ -1424,6 +1590,109 @@ function cleanupDanglingJavaScriptCoreRef(
 }
 
 /**
+ * Normalize one plugin generated-source path into the fields a PBXFileReference
+ * needs. Stores an SRCROOT-relative path (`sourceTree = SOURCE_ROOT`) when the
+ * source lives under the app root — the typical case (build/generated/…) — and
+ * an absolute path (`sourceTree = "<absolute>"`) otherwise. Returns null (with a
+ * loud log) for an extension the pbxproj can't compile.
+ */
+function normalizeGeneratedSource(
+  appRoot /*: string */,
+  srcPath /*: string */,
+) /*: ?GeneratedSource */ {
+  const ext = path.extname(srcPath).toLowerCase();
+  const fileType = GENERATED_SOURCE_FILE_TYPES[ext];
+  if (fileType == null) {
+    log(
+      `warning: unsupported generated-source extension "${ext}" for ` +
+        `${srcPath}; skipping (SPM plugin sources must be .swift/.m/.mm).`,
+    );
+    return null;
+  }
+  const abs = path.isAbsolute(srcPath)
+    ? srcPath
+    : path.resolve(appRoot, srcPath);
+  const rel = path.relative(appRoot, abs);
+  const underAppRoot =
+    rel !== '' &&
+    rel !== '..' &&
+    !rel.startsWith('..' + path.sep) &&
+    !path.isAbsolute(rel);
+  return {
+    path: underAppRoot ? rel : abs,
+    name: path.basename(abs),
+    sourceTree: underAppRoot ? 'SOURCE_ROOT' : '"<absolute>"',
+    fileType,
+  };
+}
+
+/**
+ * Read + normalize the plugin generated-sources manifest at
+ * `<appRoot>/build/generated/autolinking/.spm-plugin-generated-sources.json`.
+ * Absent, empty, or malformed → `[]` (the feature stays inert for non-plugin
+ * apps and never breaks injection). The file need not exist yet at inject time:
+ * the build-time sync regenerates it before compile, and a PBXFileReference to a
+ * not-yet-created path is valid.
+ */
+function readGeneratedSourcesManifest(
+  appRoot /*: string */,
+) /*: Array<GeneratedSource> */ {
+  const manifestPath = path.join(appRoot, SPM_GENERATED_SOURCES_MANIFEST);
+  let raw /*: string */;
+  try {
+    raw = fs.readFileSync(manifestPath, 'utf8');
+  } catch {
+    return [];
+  }
+  let entries /*: unknown */;
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    log(
+      `warning: could not parse ${SPM_GENERATED_SOURCES_MANIFEST}; ` +
+        'skipping generated sources.',
+    );
+    return [];
+  }
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  const out /*: Array<GeneratedSource> */ = [];
+  for (const entry of entries) {
+    if (
+      entry == null ||
+      typeof entry !== 'object' ||
+      typeof entry.path !== 'string'
+    ) {
+      continue;
+    }
+    const normalized = normalizeGeneratedSource(appRoot, entry.path);
+    // Dedupe by normalized path — a duplicate manifest entry would otherwise
+    // double-insert identical-UUID pbxproj objects.
+    if (normalized != null && !out.some(s => s.path === normalized.path)) {
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+/**
+ * Read the `.spm-injected.json` marker of a previously-injected project, or
+ * null when absent/unreadable. Used to reconcile generated sources on `update`.
+ */
+function readMarker(
+  xcodeprojPath /*: string */,
+) /*: ?{generatedSources?: {[string]: Array<string>}, ...} */ {
+  const markerPath = path.join(xcodeprojPath, SPM_INJECTED_MARKER);
+  try {
+    // $FlowFixMe[incompatible-return] JSON.parse returns any
+    return JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Add SPM packages to a user's EXISTING xcodeproj in place. Returns
  * {status: 'injected', target} on success, or {status: 'refused', reason}
  * when the project can't be safely edited (caller surfaces it; fail-loud).
@@ -1447,19 +1716,61 @@ function injectSpmIntoExistingXcodeproj(
   const reactNativePath = path.relative(appRoot, reactNativeRoot);
   const remote = remotePackageConfig(appRoot);
   const hermesCliPath = resolveHermesCliPathSetting(reactNativeRoot);
-  const {text, injectedUuids, createdArrayFields, buildSettingChanges} =
-    injectSpmIntoPbxproj(
-      original,
-      {
-        rootUuid: plan.rootUuid,
-        targetUuid: plan.target.uuid,
-        configUuids: plan.configUuids,
-        frameworksPhaseUuid: plan.frameworksPhaseUuid,
-      },
-      reactNativePath,
-      remote,
-      hermesCliPath,
+  const generatedSources = readGeneratedSourcesManifest(appRoot);
+
+  // Reconcile generated sources injected on a PRIOR run that are no longer in
+  // the manifest (a plugin's entry was dropped, or the plugin was removed).
+  // Diff the marker's `generatedSources` map against the current manifest and
+  // delete only the stale UUIDs — the additive injection below re-emits (and
+  // idempotently skips) everything that remains, so an unchanged run stays
+  // byte-identical. deinit needs none of this: the removed objects live in
+  // `injectedUuids`.
+  const prevGeneratedSources /*: {[string]: Array<string>} */ =
+    readMarker(xcodeprojPath)?.generatedSources ?? {};
+  const currentPaths = new Set(generatedSources.map(s => s.path));
+  const staleUuids /*: Array<string> */ = [];
+  for (const p of Object.keys(prevGeneratedSources)) {
+    if (!currentPaths.has(p)) {
+      staleUuids.push(...prevGeneratedSources[p]);
+    }
+  }
+  // When the last generated source is gone, retire the now-empty group too.
+  if (
+    generatedSources.length === 0 &&
+    Object.keys(prevGeneratedSources).length > 0
+  ) {
+    staleUuids.push(
+      namespacedUUID(plan.rootUuid, 'PBXGroup', SPM_GENERATED_SOURCES_GROUP_ID),
     );
+  }
+  let base = original;
+  if (staleUuids.length > 0) {
+    base = removeArrayMembersByUuid(base, staleUuids);
+    for (const u of staleUuids) {
+      base = removeObjectByUuid(base, u);
+    }
+  }
+
+  const {
+    text,
+    injectedUuids,
+    createdArrayFields,
+    buildSettingChanges,
+    generatedSourceUuids,
+  } = injectSpmIntoPbxproj(
+    base,
+    {
+      rootUuid: plan.rootUuid,
+      targetUuid: plan.target.uuid,
+      configUuids: plan.configUuids,
+      frameworksPhaseUuid: plan.frameworksPhaseUuid,
+      sourcesPhaseUuid: plan.sourcesPhaseUuid,
+    },
+    reactNativePath,
+    remote,
+    hermesCliPath,
+    generatedSources,
+  );
 
   const changed = writeIfChanged(pbxprojPath, text);
   log(
@@ -1489,6 +1800,9 @@ function injectSpmIntoExistingXcodeproj(
         injectedUuids: Array.from(new Set(injectedUuids)).sort(),
         createdArrayFields,
         buildSettingChanges,
+        // Normalized path → [fileRefUuid, buildFileUuid]. Read back on the next
+        // `update` to reconcile away entries that left the manifest.
+        generatedSources: generatedSourceUuids,
         scheme: {
           file: schemeResult.file,
           created: schemeResult.status === 'created',

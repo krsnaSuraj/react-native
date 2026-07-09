@@ -1118,10 +1118,10 @@ describe('main() — autolinking plugin host exemption', () => {
 // ---------------------------------------------------------------------------
 // main() — plugin flavoredArtifacts sidecar
 //
-// The sidecar (.spm-plugin-flavored-artifacts.json) is consumed by the
-// build-time swap-flavor pass. It is ALWAYS rewritten — `[]` when no plugin
-// declares any — so removing a plugin clears stale entries (unlike the
-// generated-sources sidecar, written only when non-empty).
+// Both plugin sidecars (.spm-plugin-flavored-artifacts.json, consumed by the
+// build-time swap-flavor pass, and .spm-plugin-generated-sources.json,
+// consumed by the injector) are ALWAYS rewritten — `[]` when no plugin
+// declares any — so removing a plugin clears stale entries.
 // ---------------------------------------------------------------------------
 
 describe('main() — flavoredArtifacts sidecar', () => {
@@ -1166,6 +1166,20 @@ describe('main() — flavoredArtifacts sidecar', () => {
     );
     return {appRoot, rnRoot};
   }
+
+  it('writes [] to the generated-sources sidecar when no plugin declares any (clears stale entries)', () => {
+    const {appRoot, rnRoot} = scaffold({});
+    const genSourcesPath = path.join(
+      path.dirname(sidecarPath(appRoot)),
+      '.spm-plugin-generated-sources.json',
+    );
+    // Pre-seed a stale manifest to prove it is overwritten, not left alone —
+    // the injector's reconciliation trusts this file, so a full plugin
+    // removal must reset it to [].
+    fs.writeFileSync(genSourcesPath, JSON.stringify([{path: '/stale.swift'}]));
+    main(['--app-root', appRoot, '--react-native-root', rnRoot]);
+    expect(JSON.parse(fs.readFileSync(genSourcesPath, 'utf8'))).toEqual([]);
+  });
 
   it('writes [] when no plugin declares flavored artifacts (clears stale entries)', () => {
     const {appRoot, rnRoot} = scaffold({});

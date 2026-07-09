@@ -57,12 +57,12 @@ type PrivacyManifest = {
 
 // Recursively sorts object keys so structurally-equal values serialize
 // identically regardless of source key order (arrays keep their order).
-function canonicalize(value /*: mixed */) /*: mixed */ {
+function canonicalize(value /*: unknown */) /*: unknown */ {
   if (Array.isArray(value)) {
     return value.map(canonicalize);
   }
   if (value != null && typeof value === 'object') {
-    const out /*: {[string]: mixed} */ = {};
+    const out /*: {[string]: unknown} */ = {};
     for (const k of Object.keys(value).sort()) {
       out[k] = canonicalize(value[k]);
     }
@@ -103,11 +103,12 @@ function mergePrivacyManifests(
         reasonsByType.set(category, []);
         typeOrder.push(category);
       }
-      if (entry.NSPrivacyAccessedAPITypeReasons != null) {
+      const entryReasons = entry.NSPrivacyAccessedAPITypeReasons;
+      if (entryReasons != null) {
         typeHadReasonsKey.add(category);
         const reasons = reasonsByType.get(category);
         if (reasons != null) {
-          for (const reason of entry.NSPrivacyAccessedAPITypeReasons) {
+          for (const reason of entryReasons) {
             if (!reasons.includes(reason)) {
               reasons.push(reason);
             }

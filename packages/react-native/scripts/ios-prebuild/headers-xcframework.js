@@ -29,6 +29,10 @@ const {execSync} = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+// APFS clonefile (-c) is a macOS-only cp flag; plain -R elsewhere (Linux CI
+// exercises these paths through the jest integration tests).
+const CP_FLAGS = process.platform === 'darwin' ? '-Rc' : '-R';
+
 /*::
 export type StubSlice = {
   name: string, // human label
@@ -222,7 +226,7 @@ function buildDepsHeadersXcframework(
   try {
     for (const ns of namespaces) {
       execSync(
-        `/bin/cp -Rc "${path.join(depsHeaders, ns)}" "${path.join(stage, ns)}"`,
+        `/bin/cp ${CP_FLAGS} "${path.join(depsHeaders, ns)}" "${path.join(stage, ns)}"`,
       );
     }
     outXcfw = composeHeadersOnlyXcframework(

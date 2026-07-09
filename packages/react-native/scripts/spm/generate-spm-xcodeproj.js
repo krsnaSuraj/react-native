@@ -260,6 +260,46 @@ function buildSyncAutolinkingScript(
 ) /*: string */ {
   return `set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Resolve a node binary and the react-native package dir at BUILD TIME. Both
+# the flavor swap and the sync below dispatch DIRECTLY into react-native's
+# scripts rather than through 'npx react-native' — that CLI requires
+# @react-native-community/cli (absent in e.g. Expo apps), so it would exit
+# non-zero and the failure would be silently swallowed, leaving the build with
+# the wrong-flavor frameworks (Debug builds then hit 'No script URL provided').
+# ---------------------------------------------------------------------------
+NODE_BINARY="\${NODE_BINARY:-}"
+if [ -z "$NODE_BINARY" ]; then
+  # Source RN's standard app-local node-path files. They reference vars that
+  # may be unset and may return non-zero, so relax nounset AND errexit while
+  # sourcing — a buggy user .xcode.env must degrade to PATH-based node
+  # resolution below, not silently abort every build.
+  set +eu
+  if [ -f "$SRCROOT/.xcode.env" ]; then
+    . "$SRCROOT/.xcode.env"
+  fi
+  if [ -f "$SRCROOT/.xcode.env.local" ]; then
+    . "$SRCROOT/.xcode.env.local"
+  fi
+  set -eu
+  NODE_BINARY="\${NODE_BINARY:-}"
+fi
+if [ -z "$NODE_BINARY" ]; then
+  NODE_BINARY="$(command -v node 2>/dev/null || true)"
+fi
+
+# Resolve react-native's dir FROM THE APP (require.resolve), not a
+# generation-time baked path — the baked path goes stale in pnpm / hoisted
+# stores. Fall back to the baked path if resolution fails or the resolved dir
+# has no setup-apple-spm.js.
+RN_DIR=""
+if [ -n "$NODE_BINARY" ]; then
+  RN_DIR="$(cd "$SRCROOT" && "$NODE_BINARY" --print "require('path').dirname(require.resolve('react-native/package.json'))" 2>/dev/null || true)"
+fi
+if [ -z "$RN_DIR" ] || [ ! -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
+  RN_DIR="${reactNativePath}"
+fi
+
 # Swap the flavored framework binaries (React / ReactNativeDependencies /
 # hermesvm) to match the Xcode build configuration. SwiftPM can't branch a
 # binaryTarget on $CONFIGURATION, so — mirroring the CocoaPods
@@ -269,10 +309,50 @@ function buildSyncAutolinkingScript(
 # no sync input) and is timing-robust: it operates on the ALREADY-copied
 # frameworks, so it doesn't race SPM package resolution. A no-op in the scheme
 # pre-action ($BUILT_PRODUCTS_DIR unset / nothing copied yet) and when already
-# the right flavor. Non-fatal.
-if command -v npx >/dev/null 2>&1 && [ -n "\${BUILT_PRODUCTS_DIR:-}" ]; then
-  ( cd "$SRCROOT" && npx react-native spm swap-flavor ) \\
-    || echo "warning: 'react-native spm swap-flavor' failed; build may link the add-time flavor"
+# the right flavor.
+if [ -n "\${BUILT_PRODUCTS_DIR:-}" ]; then
+  SWAP_OK=0
+  SWAP_REASON=""
+  if [ -z "$NODE_BINARY" ]; then
+    SWAP_REASON="no node binary found (set NODE_BINARY or add ios/.xcode.env)"
+  elif [ ! -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
+    SWAP_REASON="could not locate the react-native package (setup-apple-spm.js)"
+  elif ( cd "$SRCROOT" && "$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" swap-flavor ); then
+    SWAP_OK=1
+  else
+    SWAP_REASON="swap-flavor exited non-zero"
+  fi
+
+  if [ "$SWAP_OK" -eq 0 ]; then
+    # The swap could not run. Determine — in pure shell, mirroring
+    # swap-flavor.js — whether the pinned add-time flavor will ACTUALLY mismatch
+    # this configuration. swap-flavor.js maps CONFIGURATION=Release to the
+    # 'release' flavor and everything else (Debug + custom config names) to
+    # 'debug'; the pinned flavor is the parent dir of the React.xcframework
+    # symlink target (.../<version>/<flavor>/React.xcframework).
+    DESIRED_FLAVOR=debug
+    if [ "\${CONFIGURATION:-}" = "Release" ]; then
+      DESIRED_FLAVOR=release
+    fi
+    PINNED_FLAVOR=""
+    LINK_TARGET="$(readlink "$SRCROOT/build/xcframeworks/React.xcframework" 2>/dev/null || true)"
+    if [ -n "$LINK_TARGET" ]; then
+      PINNED_PARENT="$(basename "$(dirname "$LINK_TARGET")")"
+      case "$(printf '%s' "$PINNED_PARENT" | tr '[:upper:]' '[:lower:]')" in
+        debug) PINNED_FLAVOR=debug ;;
+        release) PINNED_FLAVOR=release ;;
+      esac
+    fi
+    if [ -n "$PINNED_FLAVOR" ] && [ "$PINNED_FLAVOR" != "$DESIRED_FLAVOR" ]; then
+      # A certain Debug<->release mix — known-broken, not merely suboptimal (a
+      # Debug app linking release React has RCT_DEV=0, never queries Metro, and
+      # crashes at runtime with 'No script URL provided'). Fail the build.
+      echo "error: SwiftPM flavor swap could not run ($SWAP_REASON) and the pinned $PINNED_FLAVOR frameworks do not match the $DESIRED_FLAVOR configuration — the app will misbehave (Debug builds: 'No script URL provided'). Put Node on PATH or set NODE_BINARY in ios/.xcode.env, then rebuild; or run 'npx react-native spm swap-flavor' from a terminal."
+      exit 1
+    else
+      echo "warning: SwiftPM flavor swap could not run ($SWAP_REASON); build may link the add-time flavor"
+    fi
+  fi
 fi
 
 STAMP="$SRCROOT/build/generated/autolinking/.spm-sync-stamp"
@@ -384,7 +464,7 @@ fi
 
 echo "SPM sync inputs changed — re-syncing (codegen + autolinking)..."
 
-WITH_ENVIRONMENT="${reactNativePath}/scripts/xcode/with-environment.sh"
+WITH_ENVIRONMENT="$RN_DIR/scripts/xcode/with-environment.sh"
 
 if [ -f "$WITH_ENVIRONMENT" ]; then
   # with-environment.sh references PODS_ROOT and $1, which may be unset.
@@ -396,24 +476,28 @@ if [ -f "$WITH_ENVIRONMENT" ]; then
 fi
 
 cd "$SRCROOT"
-if command -v npx >/dev/null 2>&1; then
-  # \`|| RC=$?\` so a non-zero exit is CAPTURED rather than aborting the phase
-  # under \`set -e\` — the whole point is to branch on the code below (2 = fail
-  # the build with a scaffold hint; other non-zero = warn but don't break).
-  RC=0
+# \`|| RC=$?\` so a non-zero exit is CAPTURED rather than aborting the phase
+# under \`set -e\` — the whole point is to branch on the code below (2 = fail
+# the build with a scaffold hint; other non-zero = warn but don't break).
+RC=0
+if [ -n "$NODE_BINARY" ] && [ -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
+  # Direct, dependency-free dispatch (no \`npx react-native\`, which needs
+  # @react-native-community/cli).
+  "$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" sync || RC=$?
+elif command -v npx >/dev/null 2>&1; then
   npx react-native spm sync || RC=$?
-  if [ "$RC" -eq 2 ]; then
-    # Exit 2 = an autolinked community dependency has no Package.swift. The
-    # autolinker already printed an \`error:\` line per dep (so Xcode shows them
-    # and the fix). Fail the build — the developer must run
-    # \`npx react-native spm scaffold\` from a terminal to generate the manifest.
-    exit 1
-  elif [ "$RC" -ne 0 ]; then
-    echo "warning: SPM sync failed — build may use stale codegen/autolinking"
-    exit 0
-  fi
 else
-  echo "warning: npx not found — skipping SPM sync"
+  echo "warning: node/npx not found — skipping SPM sync"
+  exit 0
+fi
+if [ "$RC" -eq 2 ]; then
+  # Exit 2 = an autolinked community dependency has no Package.swift. The
+  # autolinker already printed an \`error:\` line per dep (so Xcode shows them
+  # and the fix). Fail the build — the developer must run
+  # \`npx react-native spm scaffold\` from a terminal to generate the manifest.
+  exit 1
+elif [ "$RC" -ne 0 ]; then
+  echo "warning: SPM sync failed — build may use stale codegen/autolinking"
   exit 0
 fi
 `;
@@ -1412,6 +1496,7 @@ function removeSpmInjection(
 
 module.exports = {
   generateXcscheme,
+  buildSyncAutolinkingScript,
   ensureStubPackages,
   buildSpmDependencyGraph,
   spmGraphToEntries,

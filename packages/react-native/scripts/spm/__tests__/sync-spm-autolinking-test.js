@@ -10,7 +10,11 @@
 
 'use strict';
 
-const {decideSyncPlan, main} = require('../sync-spm-autolinking');
+const {
+  decideSyncPlan,
+  deriveFlavorFromPin,
+  main,
+} = require('../sync-spm-autolinking');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -46,6 +50,45 @@ describe('decideSyncPlan', () => {
     });
     // A stray cache must not change the remote-mode decision.
     expect(decideSyncPlan(remote, true).shouldGeneratePackage).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deriveFlavorFromPin — reads the flavor a prior add/sync pinned, from the
+// React.xcframework slot symlink. Preserves a Release pin instead of stomping
+// it back to debug on every sync.
+// ---------------------------------------------------------------------------
+
+describe('deriveFlavorFromPin', () => {
+  let appRoot;
+  beforeEach(() => {
+    appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-pin-'));
+  });
+  afterEach(() => fs.rmSync(appRoot, {recursive: true, force: true}));
+
+  const pin = target => {
+    const dir = path.join(appRoot, 'build', 'xcframeworks');
+    fs.mkdirSync(dir, {recursive: true});
+    fs.symlinkSync(target, path.join(dir, 'React.xcframework'));
+  };
+
+  it('reads "release" from a release-pinned slot symlink', () => {
+    pin(path.join(appRoot, 'cache', '1.0', 'release', 'React.xcframework'));
+    expect(deriveFlavorFromPin(appRoot)).toBe('release');
+  });
+
+  it('reads "debug" from a debug-pinned slot symlink', () => {
+    pin(path.join(appRoot, 'cache', '1.0', 'debug', 'React.xcframework'));
+    expect(deriveFlavorFromPin(appRoot)).toBe('debug');
+  });
+
+  it('defaults to "debug" when the slot symlink is absent', () => {
+    expect(deriveFlavorFromPin(appRoot)).toBe('debug');
+  });
+
+  it('defaults to "debug" for an unrecognized flavor segment', () => {
+    pin(path.join(appRoot, 'cache', '1.0', 'weird', 'React.xcframework'));
+    expect(deriveFlavorFromPin(appRoot)).toBe('debug');
   });
 });
 
@@ -128,6 +171,25 @@ describe('main', () => {
     expect(fs.existsSync(stampPath())).toBe(true);
   });
 
+  it('preserves a release pin — flavor flows into cache-slot, download, and autolinking args', async () => {
+    const dir = path.join(appRoot, 'build', 'xcframeworks');
+    fs.mkdirSync(dir, {recursive: true});
+    fs.symlinkSync(
+      path.join(appRoot, 'cache', '1.0', 'release', 'React.xcframework'),
+      path.join(dir, 'React.xcframework'),
+    );
+    const deps = makeDeps();
+    await run(deps);
+
+    expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'release');
+    expect(deps.downloadArtifacts).toHaveBeenCalledWith(
+      expect.arrayContaining(['--flavor', 'release']),
+    );
+    expect(deps.generateAutolinking).toHaveBeenCalledWith(
+      expect.arrayContaining(['--flavor', 'release']),
+    );
+  });
+
   it('local mode, populated cache: skips download but still generates', async () => {
     fs.writeFileSync(path.join(cacheDir, 'artifacts.json'), '{}');
     const deps = makeDeps();
@@ -175,5 +237,25 @@ describe('main', () => {
     await expect(run(deps)).rejects.toThrow(/npm offline/);
     // The stamp is only written on a successful run.
     expect(fs.existsSync(stampPath())).toBe(false);
+  });
+
+  // Regression test for the failure-atomicity bug: generateAutolinking runs
+  // fail-closed autolinking plugins that can throw. If installSpmCodegenTemplate
+  // hasn't already run by then, codegen's mis-rooted default
+  // build/generated/ios/Package.swift is left in place and every subsequent
+  // Xcode "Resolve Package Graph" fails. installSpmCodegenTemplate must be
+  // called before generateAutolinking regardless of whether it throws.
+  it('installs the codegen template before generateAutolinking runs, even if generateAutolinking throws', async () => {
+    const deps = makeDeps({
+      generateAutolinking: jest.fn(() => {
+        throw new Error('autolinking plugin blew up');
+      }),
+    });
+    await expect(run(deps)).rejects.toThrow(/autolinking plugin blew up/);
+
+    expect(deps.installSpmCodegenTemplate).toHaveBeenCalledTimes(1);
+    expect(
+      deps.installSpmCodegenTemplate.mock.invocationCallOrder[0],
+    ).toBeLessThan(deps.generateAutolinking.mock.invocationCallOrder[0]);
   });
 });

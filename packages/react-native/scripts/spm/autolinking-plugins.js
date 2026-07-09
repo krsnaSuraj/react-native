@@ -50,6 +50,11 @@
  *         packageDependencies: [{name, path}] | [{name, url, version}],
  *         productDependencies: [{name, package}],
  *         generatedSources: [{path}],
+ *         // Precompiled xcframeworks that come in debug/release flavor pairs.
+ *         // `link` is a plugin-owned stable symlink its binaryTarget references;
+ *         // RN's build-time swap-flavor repoints it per $CONFIGURATION. Recorded
+ *         // to `.spm-plugin-flavored-artifacts.json` and consumed there.
+ *         flavoredArtifacts: [{name, link, flavors: {debug?, release?}}],
  *       };
  *     };
  *
@@ -139,13 +144,19 @@ function discoverPlugins(
 function invokePlugins(
   plugins /*: ReadonlyArray<DiscoveredPlugin> */,
   context /*: PluginContext */,
+  logger /*: {warn: (msg: string) => void} */ = {
+    warn: msg => console.warn(msg),
+  },
 ) /*: PluginResult */ {
   const packageDependencies /*: Array<{name: string, path?: string, url?: string, version?: string}> */ =
     [];
   const productDependencies /*: Array<{name: string, package: string}> */ = [];
   const generatedSources /*: Array<{path: string}> */ = [];
+  const flavoredArtifacts /*: Array<{name: string, link: string, flavors: {debug?: string, release?: string}}> */ =
+    [];
   const seenPackages /*: Set<string> */ = new Set();
   const seenProducts /*: Set<string> */ = new Set();
+  const seenArtifacts /*: Set<string> */ = new Set();
 
   for (const {depName, pluginPath, plugin} of plugins) {
     let result /*: unknown */;
@@ -172,6 +183,17 @@ function invokePlugins(
     const prods = result.productDependencies ?? [];
     // $FlowFixMe[incompatible-use]
     const srcs = result.generatedSources ?? [];
+    // $FlowFixMe[incompatible-use]
+    const rawArts = result.flavoredArtifacts ?? [];
+    // Never let a malformed flavoredArtifacts break the build — a non-array
+    // (e.g. an object) would make the drop-loop below throw. Warn and ignore.
+    if (!Array.isArray(rawArts)) {
+      logger.warn(
+        `react-native spm: '${depName}' returned a non-array flavoredArtifacts ` +
+          `— ignoring it.`,
+      );
+    }
+    const arts = Array.isArray(rawArts) ? rawArts : [];
     for (const p of pkgs) {
       if (p == null || typeof p.name !== 'string') {
         throw new Error(
@@ -213,9 +235,47 @@ function invokePlugins(
       }
       generatedSources.push(s);
     }
+    // flavoredArtifacts are DROPPED (with a warning), not fatal: they're an
+    // optional Preview capability the build shouldn't break over, and a
+    // malformed entry only means one plugin framework won't flavor-swap.
+    for (const a of arts) {
+      const flavorsOk =
+        a != null &&
+        a.flavors != null &&
+        typeof a.flavors === 'object' &&
+        // $FlowFixMe[incompatible-use] dynamic shape, validated here
+        Object.values(a.flavors).every(v => typeof v === 'string');
+      if (
+        a == null ||
+        typeof a.name !== 'string' ||
+        a.name.length === 0 ||
+        typeof a.link !== 'string' ||
+        a.link.length === 0 ||
+        !flavorsOk
+      ) {
+        logger.warn(
+          `react-native spm: '${depName}' returned an invalid flavoredArtifact ` +
+            `(need {name, link} non-empty strings and flavors as an object of ` +
+            `string paths) — dropping it.`,
+        );
+        continue;
+      }
+      // Dedupe by name so two plugins declaring the same artifact don't
+      // double-swap (mirrors the package/product dedupe).
+      if (seenArtifacts.has(a.name)) {
+        continue;
+      }
+      seenArtifacts.add(a.name);
+      flavoredArtifacts.push({name: a.name, link: a.link, flavors: a.flavors});
+    }
   }
 
-  return {packageDependencies, productDependencies, generatedSources};
+  return {
+    packageDependencies,
+    productDependencies,
+    generatedSources,
+    flavoredArtifacts,
+  };
 }
 
 module.exports = {

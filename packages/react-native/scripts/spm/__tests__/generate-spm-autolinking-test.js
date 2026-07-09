@@ -1114,3 +1114,125 @@ describe('main() — autolinking plugin host exemption', () => {
     ).toThrow(MissingManifestError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// main() — plugin flavoredArtifacts sidecar
+//
+// The sidecar (.spm-plugin-flavored-artifacts.json) is consumed by the
+// build-time swap-flavor pass. It is ALWAYS rewritten — `[]` when no plugin
+// declares any — so removing a plugin clears stale entries (unlike the
+// generated-sources sidecar, written only when non-empty).
+// ---------------------------------------------------------------------------
+
+describe('main() — flavoredArtifacts sidecar', () => {
+  let created = [];
+  let spies = [];
+
+  beforeEach(() => {
+    for (const m of ['log', 'warn', 'error']) {
+      spies.push(jest.spyOn(console, m).mockImplementation(() => {}));
+    }
+  });
+  afterEach(() => {
+    for (const s of spies) s.mockRestore();
+    spies = [];
+    for (const d of created) fs.rmSync(d, {recursive: true, force: true});
+    created = [];
+  });
+
+  const sidecarPath = appRoot =>
+    path.join(
+      appRoot,
+      'build',
+      'generated',
+      'autolinking',
+      '.spm-plugin-flavored-artifacts.json',
+    );
+
+  function scaffold(autolinkingDeps) {
+    const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-flavart-'));
+    created.push(appRoot);
+    const rnRoot = path.join(appRoot, 'rn');
+    fs.mkdirSync(rnRoot, {recursive: true});
+    fs.writeFileSync(
+      path.join(appRoot, 'package.json'),
+      JSON.stringify({name: 'app'}),
+    );
+    const autolinkDir = path.join(appRoot, 'build', 'generated', 'autolinking');
+    fs.mkdirSync(autolinkDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(autolinkDir, 'autolinking.json'),
+      JSON.stringify({dependencies: autolinkingDeps}),
+    );
+    return {appRoot, rnRoot};
+  }
+
+  it('writes [] when no plugin declares flavored artifacts (clears stale entries)', () => {
+    const {appRoot, rnRoot} = scaffold({});
+    // Pre-seed a stale sidecar to prove it is overwritten, not left alone.
+    fs.writeFileSync(
+      sidecarPath(appRoot),
+      JSON.stringify([{name: 'Stale', link: '/x', flavors: {}}]),
+    );
+    main(['--app-root', appRoot, '--react-native-root', rnRoot]);
+    expect(JSON.parse(fs.readFileSync(sidecarPath(appRoot), 'utf8'))).toEqual(
+      [],
+    );
+  });
+
+  it('records a plugin-declared flavored artifact to the sidecar', () => {
+    const {appRoot, rnRoot} = scaffold({
+      expo: {
+        root: path.join('__EXPO__'),
+        platforms: {ios: {}},
+      },
+    });
+    const expoDir = path.join(appRoot, 'node_modules', 'expo');
+    fs.mkdirSync(path.join(expoDir, 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(expoDir, 'ios', 'Expo.mm'), '// native\n');
+    // Point autolinking.json's expo root at the real dir.
+    fs.writeFileSync(
+      path.join(
+        appRoot,
+        'build',
+        'generated',
+        'autolinking',
+        'autolinking.json',
+      ),
+      JSON.stringify({
+        dependencies: {expo: {root: expoDir, platforms: {ios: {}}}},
+      }),
+    );
+    fs.writeFileSync(
+      path.join(expoDir, 'react-native.config.js'),
+      "module.exports = { spm: { autolinkingPlugin: './spm-plugin.js' } };\n",
+    );
+    fs.writeFileSync(
+      path.join(expoDir, 'spm-plugin.js'),
+      'module.exports = function () {\n' +
+        '  return {\n' +
+        "    packageDependencies: [{name: 'ExpoModulesCore', path: '../../../../node_modules/expo/ios'}],\n" +
+        "    productDependencies: [{name: 'ExpoModulesCore', package: 'ExpoModulesCore'}],\n" +
+        '    flavoredArtifacts: [{\n' +
+        "      name: 'ExpoModulesCore',\n" +
+        "      link: '/abs/ExpoModulesCore/artifacts/ExpoModulesCore.xcframework',\n" +
+        "      flavors: {debug: '/abs/debug/ExpoModulesCore.xcframework', release: '/abs/release/ExpoModulesCore.xcframework'},\n" +
+        '    }],\n' +
+        '  };\n' +
+        '};\n',
+    );
+
+    main(['--app-root', appRoot, '--react-native-root', rnRoot]);
+
+    expect(JSON.parse(fs.readFileSync(sidecarPath(appRoot), 'utf8'))).toEqual([
+      {
+        name: 'ExpoModulesCore',
+        link: '/abs/ExpoModulesCore/artifacts/ExpoModulesCore.xcframework',
+        flavors: {
+          debug: '/abs/debug/ExpoModulesCore.xcframework',
+          release: '/abs/release/ExpoModulesCore.xcframework',
+        },
+      },
+    ]);
+  });
+});

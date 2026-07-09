@@ -78,15 +78,52 @@ module.exports = function plugin(context) {
       // e.g. the generated module registry, registered with codegen:
       {path: 'build/generated/expo/ExpoModulesProvider.swift'},
     ],
+    flavoredArtifacts: [
+      // Precompiled xcframeworks that come in debug/release flavor pairs — the
+      // same "binaryTarget can't branch on $CONFIGURATION" problem RN solves for
+      // its own React / hermes / ReactNativeDependencies. RN's build-time
+      // swap-flavor repoints `link` to match the build configuration.
+      {
+        name: 'ExpoModulesCore',
+        link: '/…/build/generated/…/ExpoModulesCore/artifacts/ExpoModulesCore.xcframework',
+        flavors: {
+          debug: '/…/output/debug/xcframeworks/ExpoModulesCore.xcframework',
+          release: '/…/output/release/xcframeworks/ExpoModulesCore.xcframework',
+        },
+      },
+    ],
   };
 };
 ```
+
+#### `flavoredArtifacts` — per-configuration precompiled xcframeworks
+
+Each entry is `{name, link, flavors: {debug?, release?}}` with **absolute**
+paths:
+
+- `link` is a **plugin-owned** stable symlink the plugin's binaryTarget
+  references. The plugin creates it at sync time; **RN only ever repoints it** to
+  the current configuration's flavor — it never creates or deletes it (so
+  `spm deinit` leaves it untouched). If the link is missing at swap time RN
+  warns and skips (it will not create it for you).
+- `flavors.debug` / `flavors.release` are the per-flavor xcframework paths. A
+  flavor **may be absent** (not derivable) and a present path **may not exist on
+  disk yet** (not built). RN checks both at swap time: the requested flavor
+  missing → a warning (and, if the link is currently pinned to the other flavor,
+  an `error:` line, because the app would embed the wrong flavor).
+
+Recorded to `<outputDir>/.spm-plugin-flavored-artifacts.json` on every sync
+(always rewritten — `[]` when no plugin declares any, so removing a plugin clears
+stale entries) and consumed by the build-time `swap-flavor` pass, which repoints
+plugin links in the same pass as RN's own frameworks. Because that repoint runs
+in the scheme pre-action, plugin artifacts inherit graph-time embed correctness
+for free — no plugin-side swap script needed.
 
 ### Context (input)
 
 | Field | Meaning |
 |---|---|
-| `appRoot` | The `ios/` directory being injected. |
+| `appRoot` | The Xcode project directory (`<app>/ios`) being injected — **not** the app package root. Deriving package-root-relative paths from it (e.g. `path.join(appRoot, 'node_modules')`) silently breaks; use `projectRoot` for that. |
 | `projectRoot` | The JS root (nearest `package.json`) — where the framework scans `node_modules`. |
 | `reactNativeRoot` | Resolved `react-native` package root. |
 | `autolinking` | Parsed `autolinking.json` — RN's already-discovered deps, so the plugin can react to them. |
@@ -136,6 +173,7 @@ wiring, it stays correct across repackaging.
 | `packageDependencies` | The aggregator's `.package(…)` list (`path`, or `url` + `version`). |
 | `productDependencies` | The `AutolinkedAggregate` target's `dependencies:` (`.product(name:package:)`). |
 | `generatedSources` | Recorded for the codegen step to register (e.g. a module-registry `.swift`). |
+| `flavoredArtifacts` | Debug/release precompiled xcframeworks whose plugin-owned link RN repoints per `$CONFIGURATION` (see above). Recorded to `.spm-plugin-flavored-artifacts.json`. Invalid entries are dropped with a warning (not fatal). |
 
 The plugin returns **data** — it never writes into React Native's generated
 tree. RN owns the merge, so a re-sync reproduces the same `Package.swift`
@@ -167,7 +205,8 @@ message identifying the framework. A framework silently dropping its modules
 ## Status & open items (Preview)
 
 - **Implemented & tested:** discovery (transitive + deny-list), invocation,
-  package + product merge, `flavor` in context, fail-closed, dedupe.
+  package + product merge, `flavor` in context, fail-closed, dedupe,
+  `flavoredArtifacts` merge + record + build-time swap (repoint & rsync).
 - **Co-design with Expo (not final):** `generatedSources` is captured
   (written to `.spm-plugin-generated-sources.json`) but its codegen
   registration + **provider ordering** — codegen must consume the same

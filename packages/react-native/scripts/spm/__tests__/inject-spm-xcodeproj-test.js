@@ -174,6 +174,20 @@ describe('injectSpmIntoPbxproj — Tier 2 (build settings + phase)', () => {
     expect(syncIdx).toBeGreaterThan(-1);
     expect(syncIdx).toBeLessThan(sourcesIdx);
   });
+
+  it('APPENDS the Fix SPM Embedded Flavor phase (last in buildPhases)', () => {
+    const {text} = inject(PLAIN);
+    expect(text).toContain('Fix SPM Embedded Flavor');
+    // Its buildPhases-array member is the LAST entry (appended, not prepended).
+    const bp = text.slice(text.indexOf('buildPhases = ('));
+    const arr = bp.slice(0, bp.indexOf(');'));
+    const comments = [...arr.matchAll(/\/\* ([^*]+) \*\//g)].map(m => m[1]);
+    expect(comments[0]).toBe('Sync SPM Autolinking'); // prepended, first
+    expect(comments[comments.length - 1]).toBe('Fix SPM Embedded Flavor');
+    // Runs after Sources (post-embed).
+    const fixIdx = text.indexOf('Fix SPM Embedded Flavor */,');
+    expect(fixIdx).toBeGreaterThan(text.indexOf('Sources */,'));
+  });
 });
 
 describe('injectSpmIntoPbxproj — invariants', () => {
@@ -211,6 +225,58 @@ describe('injectSpmIntoPbxproj — invariants', () => {
     // Sanity bound: the SPM graph + settings + phase is well under 120 lines.
     expect(added).toBeGreaterThan(0);
     expect(added).toBeLessThan(120);
+  });
+
+  it('refreshes a stale shellScript on re-injection', () => {
+    const first = inject(PLAIN).text;
+    // Simulate an earlier run whose generated script has since changed (e.g.
+    // fixed dispatch logic) by corrupting a substring of the baked-in script.
+    const stale = first.replace(
+      'npx react-native spm sync',
+      'STALE_OLD_SYNC_COMMAND',
+    );
+    expect(stale).not.toBe(first);
+    const plan = planInjection(stale, {});
+    const second = injectSpmIntoPbxproj(
+      stale,
+      {
+        rootUuid: plan.rootUuid,
+        targetUuid: plan.target.uuid,
+        configUuids: plan.configUuids,
+        frameworksPhaseUuid: plan.frameworksPhaseUuid,
+      },
+      RN_PATH,
+      null,
+    ).text;
+    // The stale marker is gone and the current script is restored.
+    expect(second).not.toContain('STALE_OLD_SYNC_COMMAND');
+    expect(second).toContain('npx react-native spm sync');
+    expect(second).toBe(first);
+  });
+
+  it('refreshes a stale Fix SPM Embedded Flavor shellScript on re-injection', () => {
+    const first = inject(PLAIN).text;
+    // Corrupt a substring unique to the embedded-fix phase script.
+    const stale = first.replace(
+      'SPM embedded-flavor fix could not run',
+      'STALE_EMBEDDED_MARKER',
+    );
+    expect(stale).not.toBe(first);
+    const plan = planInjection(stale, {});
+    const second = injectSpmIntoPbxproj(
+      stale,
+      {
+        rootUuid: plan.rootUuid,
+        targetUuid: plan.target.uuid,
+        configUuids: plan.configUuids,
+        frameworksPhaseUuid: plan.frameworksPhaseUuid,
+      },
+      RN_PATH,
+      null,
+    ).text;
+    expect(second).not.toContain('STALE_EMBEDDED_MARKER');
+    expect(second).toContain('SPM embedded-flavor fix could not run');
+    expect(second).toBe(first);
   });
 
   it('namespaces injected UUIDs by the host project root (collision-safe, stable)', () => {

@@ -11,6 +11,8 @@
 'use strict';
 
 const {
+  addPreActionToScheme,
+  buildEmbeddedFixScript,
   buildSyncAutolinkingScript,
   generateXcscheme,
 } = require('../generate-spm-xcodeproj');
@@ -86,6 +88,80 @@ describe('generateXcscheme', () => {
 });
 
 // ---------------------------------------------------------------------------
+// addPreActionToScheme — the marker-tracked pre-action must refresh its
+// scriptText on re-injection instead of freezing it at whatever it was on
+// first run (Expo hit this in production: the pre-action kept stale dispatch
+// logic forever because the guard only checked for the title's presence).
+// ---------------------------------------------------------------------------
+
+describe('addPreActionToScheme', () => {
+  it('refreshes a stale scriptText on re-injection', () => {
+    const first = generateXcscheme(
+      'MyApp',
+      'TARGET_UUID',
+      'MyApp',
+      'OLD_SCRIPT',
+    );
+    const updated = addPreActionToScheme(first, 'TARGET_UUID', 'NEW_SCRIPT');
+    expect(updated).toContain('NEW_SCRIPT');
+    expect(updated).not.toContain('OLD_SCRIPT');
+    // Only the scriptText attribute changed — everything else (title,
+    // EnvironmentBuildable, structure) stays put.
+    expect(updated).toContain('title = "Sync SPM Autolinking"');
+    expect(updated).toContain('<EnvironmentBuildable>');
+  });
+
+  it('is byte-identical when the script is unchanged', () => {
+    const first = generateXcscheme(
+      'MyApp',
+      'TARGET_UUID',
+      'MyApp',
+      'SAME_SCRIPT',
+    );
+    const second = addPreActionToScheme(first, 'TARGET_UUID', 'SAME_SCRIPT');
+    expect(second).toBe(first);
+  });
+
+  it('safely refreshes a script containing $-sequences without misinterpreting them', () => {
+    // A naive String.replace(regex, escaped) would treat `$1`/`$&` inside the
+    // replacement string as backreferences and corrupt the output — the
+    // refresh must splice by index instead.
+    const first = generateXcscheme(
+      'MyApp',
+      'TARGET_UUID',
+      'MyApp',
+      'OLD_SCRIPT',
+    );
+    const trickyScript = 'echo "$1 $& $$HOME ${NODE_BINARY}"';
+    const updated = addPreActionToScheme(first, 'TARGET_UUID', trickyScript);
+    const attrStart = updated.indexOf('scriptText = "');
+    const attrEnd = updated.indexOf('"', attrStart + 'scriptText = "'.length);
+    const attrValue = updated.slice(
+      attrStart + 'scriptText = "'.length,
+      attrEnd,
+    );
+    expect(attrValue).toBe('echo &quot;$1 $&amp; $$HOME ${NODE_BINARY}&quot;');
+  });
+
+  it('adds a fresh pre-action when none exists yet (unchanged behavior)', () => {
+    const xmlWithoutPreAction = generateXcscheme(
+      'MyApp',
+      'TARGET_UUID',
+      'MyApp',
+      'X',
+    ).replace(/<PreActions>[\s\S]*?<\/PreActions>\n\s*/, '');
+    expect(xmlWithoutPreAction).not.toContain('Sync SPM Autolinking');
+    const updated = addPreActionToScheme(
+      xmlWithoutPreAction,
+      'TARGET_UUID',
+      'FRESH_SCRIPT',
+    );
+    expect(updated).toContain('Sync SPM Autolinking');
+    expect(updated).toContain('FRESH_SCRIPT');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // buildSyncAutolinkingScript — the generated "Sync SPM Autolinking" build
 // phase / pre-action shell. It must be dependency-free (no `npx react-native`,
 // which needs @react-native-community/cli — absent in e.g. Expo apps) and
@@ -119,8 +195,39 @@ describe('buildSyncAutolinkingScript', () => {
     expect(script).not.toContain('&& npx react-native spm swap-flavor )');
   });
 
-  it('gates the swap block on BUILT_PRODUCTS_DIR (scheme pre-action no-op)', () => {
-    expect(script).toContain('if [ -n "${BUILT_PRODUCTS_DIR:-}" ]; then');
+  it('short-circuits the swap when BUILT_PRODUCTS_DIR is unset (inside run_swap_flavor)', () => {
+    expect(script).toContain('if [ -z "${BUILT_PRODUCTS_DIR:-}" ]; then');
+  });
+
+  it('defines run_swap_flavor once and calls it TWICE, sandwiching the sync', () => {
+    // Swap sandwich: leading call = race-winning pre-action repoint (before the
+    // sync); trailing call = authoritative end-state after sync's linkOne re-pin.
+    expect(script).toContain('run_swap_flavor() {');
+    expect(script.match(/run_swap_flavor\(\) \{/g)).toHaveLength(1);
+    // Two bare invocations (not the definition).
+    const calls = [...script.matchAll(/\nrun_swap_flavor\n/g)];
+    expect(calls).toHaveLength(2);
+    const syncIdx = script.indexOf(
+      '"$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" sync',
+    );
+    expect(syncIdx).toBeGreaterThan(-1);
+    expect(calls[0].index).toBeLessThan(syncIdx); // leading swap before sync
+    expect(calls[1].index).toBeGreaterThan(syncIdx); // trailing swap after sync
+  });
+
+  it('ties the loud-error mismatch fallback to the FINAL (trailing) swap', () => {
+    const lastCall = script.lastIndexOf('\nrun_swap_flavor\n');
+    const fallbackIdx = script.indexOf('if [ "$SWAP_OK" -eq 0 ]; then');
+    expect(lastCall).toBeGreaterThan(-1);
+    expect(fallbackIdx).toBeGreaterThan(lastCall);
+  });
+
+  it('does not early-exit before the swap when sync inputs are unchanged', () => {
+    // A config flip (Debug<->Release) changes no sync input, so the not-stale
+    // path must still fall through to the swap rather than `exit 0`.
+    expect(script).toContain('if [ "$STALE" -eq 1 ]; then');
+    // The old unconditional "not stale -> exit 0" short-circuit is gone.
+    expect(script).not.toContain('if [ "$STALE" -eq 0 ]; then\n  exit 0');
   });
 
   it('hard-fails (error + exit 1) when the pinned flavor mismatches config', () => {
@@ -172,6 +279,52 @@ describe('buildSyncAutolinkingScript', () => {
   });
 
   it('is POSIX-sh clean: no bashisms ([[ ) in the generated script', () => {
+    expect(script).not.toContain('[[');
+  });
+
+  it('is deterministic — the build phase and scheme pre-action get the same single script', () => {
+    // injectSpmPackages builds the phase with buildSyncAutolinkingScript(rnPath)
+    // and the scheme pre-action with the same call; a pure, deterministic result
+    // guarantees both embed byte-identical text.
+    expect(buildSyncAutolinkingScript(BAKED)).toBe(
+      buildSyncAutolinkingScript(BAKED),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildEmbeddedFixScript — the appended in-target phase that runs AFTER Xcode's
+// implicit SPM Embed to deterministically correct the embedded framework flavor.
+// ---------------------------------------------------------------------------
+describe('buildEmbeddedFixScript', () => {
+  const BAKED = '../node_modules/react-native';
+  const script = buildEmbeddedFixScript(BAKED);
+
+  it('shares the node/RN_DIR resolution preamble with the sync script', () => {
+    expect(script).toContain('NODE_BINARY="${NODE_BINARY:-}"');
+    expect(script).toContain(
+      "require('path').dirname(require.resolve('react-native/package.json'))",
+    );
+    expect(script).toContain(`RN_DIR="${BAKED}"`);
+  });
+
+  it('dispatches swap-flavor directly (no npx) and is a single dispatch (no sync, no sandwich)', () => {
+    expect(script).toContain(
+      '"$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" swap-flavor',
+    );
+    // Exactly one swap dispatch; NOT the sync-phase machinery.
+    expect(script.match(/setup-apple-spm\.js" swap-flavor/g)).toHaveLength(1);
+    expect(script).not.toContain('swap-flavor" sync');
+    expect(script).not.toContain('run_swap_flavor');
+    expect(script).not.toContain('"$STALE"');
+  });
+
+  it('soft-fails (warns, no exit 1) so it never hard-breaks the build alone', () => {
+    expect(script).toContain('warning: SPM embedded-flavor fix could not run');
+    expect(script).not.toContain('exit 1');
+  });
+
+  it('is POSIX-sh clean (no bashisms)', () => {
     expect(script).not.toContain('[[');
   });
 });

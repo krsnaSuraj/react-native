@@ -1023,6 +1023,13 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
         builtProductsDir: process.env.BUILT_PRODUCTS_DIR,
         platformName: process.env.PLATFORM_NAME,
         isMacCatalyst: process.env.IS_MACCATALYST === 'YES',
+        // Embedded-copy correction (the appended "Fix SPM Embedded Flavor"
+        // phase runs after Xcode's implicit SPM Embed). Absent in the scheme
+        // pre-action, so the embedded fix is a no-op there.
+        targetBuildDir: process.env.TARGET_BUILD_DIR,
+        frameworksFolderPath: process.env.FRAMEWORKS_FOLDER_PATH,
+        codeSigningAllowed: process.env.CODE_SIGNING_ALLOWED,
+        expandedCodeSignIdentity: process.env.EXPANDED_CODE_SIGN_IDENTITY,
         logger: {log},
       });
     } catch (e) {

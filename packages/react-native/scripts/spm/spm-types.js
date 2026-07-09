@@ -216,6 +216,20 @@ export type PluginProductDep = {name: string, package: string};
 // in the codegen package so it compiles.
 export type PluginGeneratedSource = {path: string};
 
+// A plugin-declared precompiled xcframework that exists in debug/release flavor
+// pairs — the same "binaryTarget can't branch on $CONFIGURATION" problem as RN's
+// own React / hermes / ReactNativeDependencies. `link` is a PLUGIN-OWNED stable
+// symlink the plugin's binaryTarget references; RN only ever repoints it (never
+// creates or deletes it — `spm deinit` leaves it alone). `flavors` holds the
+// absolute per-flavor xcframework paths — a flavor may be absent (not derivable)
+// and a present path may not exist on disk yet (not built), both checked at swap
+// time by swap-flavor.js.
+export type PluginFlavoredArtifact = {
+  name: string,
+  link: string,
+  flavors: {debug?: string, release?: string},
+};
+
 // How a plugin depends on React — the single source of truth so a plugin's
 // own Package.swift doesn't re-derive RN's package path/identity/products.
 // Local vs remote is distinguished by which keys are present:
@@ -254,12 +268,14 @@ export type PluginResult = {
   packageDependencies: Array<PluginPackageDep>,
   productDependencies: Array<PluginProductDep>,
   generatedSources: Array<PluginGeneratedSource>,
+  flavoredArtifacts: Array<PluginFlavoredArtifact>,
 };
 
 export type SpmAutolinkingPlugin = (context: PluginContext) => ?{
   packageDependencies?: Array<PluginPackageDep>,
   productDependencies?: Array<PluginProductDep>,
   generatedSources?: Array<PluginGeneratedSource>,
+  flavoredArtifacts?: Array<PluginFlavoredArtifact>,
 };
 
 export type DiscoveredPlugin = {

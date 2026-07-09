@@ -16,11 +16,21 @@
 // Stand in with a portable plist-parse. Mocked at the `child_process` module
 // level (not via jest.spyOn) because swap-flavor.js destructures
 // `execFileSync` at require time, so a post-import spy would never be seen.
+// Every execFileSync call is recorded on globalThis.__spmExecCalls so tests can
+// assert on `codesign` / `rsync` invocations. `plutil` is stubbed (macOS-only)
+// with a portable plist-parse; `codesign` is recorded but NOT run (it would fail
+// on a fake framework / be absent on Linux CI); everything else (rsync) runs for
+// real so file-content assertions hold. Mocked at the module level because
+// swap-flavor.js destructures `execFileSync` at require time.
 jest.mock('child_process', () => {
   const actual = jest.requireActual('child_process');
   return {
     ...actual,
     execFileSync: (cmd, args, opts) => {
+      (globalThis.__spmExecCalls = globalThis.__spmExecCalls || []).push({
+        cmd,
+        args,
+      });
       if (cmd === 'plutil') {
         const fs = require('fs');
         const plist = require('plist');
@@ -28,6 +38,12 @@ jest.mock('child_process', () => {
         return Buffer.from(
           JSON.stringify(plist.parse(fs.readFileSync(file, 'utf8'))),
         );
+      }
+      if (cmd === 'codesign') {
+        if (globalThis.__spmCodesignThrows === true) {
+          throw new Error('codesign boom');
+        }
+        return Buffer.from(''); // record only — don't actually sign
       }
       return actual.execFileSync(cmd, args, opts);
     },
@@ -116,6 +132,8 @@ describe('swapFlavorFrameworks', () => {
   const read = p => fs.readFileSync(p, 'utf8');
 
   beforeEach(() => {
+    globalThis.__spmExecCalls = [];
+    globalThis.__spmCodesignThrows = false;
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swap-fw-'));
     // Cache slots: debug + release, each with a React.framework binary tagged
     // by flavor so we can assert which one landed.
@@ -154,6 +172,12 @@ describe('swapFlavorFrameworks', () => {
     read(
       path.join(builtProducts, 'PackageFrameworks', 'React.framework', 'React'),
     );
+  // The app-local slot symlink the Embed step resolves (lazy: appRoot is set in
+  // beforeEach).
+  const slotLink = () =>
+    path.join(appRoot, 'build', 'xcframeworks', 'React.xcframework');
+  const pinnedSlot = () =>
+    path.basename(path.dirname(fs.readlinkSync(slotLink())));
 
   it('swaps the copied debug framework to release for a Release build', () => {
     swapFlavorFrameworks({
@@ -190,15 +214,475 @@ describe('swapFlavorFrameworks', () => {
     expect(read(path.join(topFw, 'React'))).toBe('REACT-release');
   });
 
-  it('no-ops when the products dir does not exist (pre-action)', () => {
+  it('repoints the symlink but skips the rsync when the products dir does not exist (pre-action)', () => {
+    const logs = [];
     expect(() =>
       swapFlavorFrameworks({
         appRoot,
         configuration: 'Release',
         builtProductsDir: path.join(tmp, 'nope'),
         platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
       }),
     ).not.toThrow();
+    // Embed-step fix (repoint) runs even with no products dir — this is the
+    // clean-build / pre-action case that must be corrected before Xcode
+    // captures the embed source.
+    expect(pinnedSlot()).toBe('release');
+    // rsync skipped → the pre-existing materialized copy is left untouched.
     expect(embedded()).toBe('REACT-debug');
+    expect(logs.some(m => /no products dir yet — pre-action/.test(m))).toBe(
+      true,
+    );
+  });
+
+  it('repoints the symlink but skips the rsync when builtProductsDir is null (scheme pre-action)', () => {
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: null,
+        platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+    expect(pinnedSlot()).toBe('release');
+    expect(embedded()).toBe('REACT-debug'); // untouched — no rsync
+    expect(logs.some(m => /no products dir yet — pre-action/.test(m))).toBe(
+      true,
+    );
+  });
+
+  it('repoints the app-local slot symlink to the release slot for a Release build (embed-step fix)', () => {
+    expect(pinnedSlot()).toBe('debug'); // add-time pin
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+    // Symlink now resolves into the release slot (embed source), and the
+    // materialized copy was rsynced to release too (link source).
+    expect(pinnedSlot()).toBe('release');
+    expect(fs.existsSync(fs.readlinkSync(slotLink()))).toBe(true);
+    expect(embedded()).toBe('REACT-release');
+  });
+
+  it('leaves the slot symlink untouched for a matched (Debug) build', () => {
+    const before = fs.readlinkSync(slotLink());
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Debug',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+    expect(fs.readlinkSync(slotLink())).toBe(before); // byte-identical target
+    expect(pinnedSlot()).toBe('debug');
+  });
+
+  it('leaves the symlink alone and warns (no throw) when the desired slot is missing', () => {
+    fs.rmSync(path.join(tmp, 'cache', '1.0', 'release'), {
+      recursive: true,
+      force: true,
+    });
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: builtProducts,
+        platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+    expect(pinnedSlot()).toBe('debug'); // still the add-time pin
+    expect(logs.some(m => /release slot missing/.test(m))).toBe(true);
+  });
+
+  it('preserves a RELATIVE slot symlink target when repointing (form-preserving)', () => {
+    // Re-point the app symlink at the debug slot using a RELATIVE target
+    // (linkOne can emit either form; the repoint must not silently absolutize).
+    const links = path.join(appRoot, 'build', 'xcframeworks');
+    fs.unlinkSync(slotLink());
+    const relDebug = path.relative(
+      links,
+      path.join(tmp, 'cache', '1.0', 'debug', 'React.xcframework'),
+    );
+    expect(path.isAbsolute(relDebug)).toBe(false); // sanity: fixture is relative
+    fs.symlinkSync(relDebug, slotLink());
+
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+
+    const after = fs.readlinkSync(slotLink());
+    expect(path.isAbsolute(after)).toBe(false); // still relative
+    expect(pinnedSlot()).toBe('release');
+    // ...and it resolves to the real release slot.
+    expect(fs.existsSync(path.resolve(links, after))).toBe(true);
+    expect(
+      read(
+        path.join(
+          links,
+          after,
+          'ios-arm64_x86_64-simulator',
+          'React.framework',
+          'React',
+        ),
+      ),
+    ).toBe('REACT-release');
+  });
+
+  it('never creates a dangling pin when a framework symlink lives in a different cache dir', () => {
+    // React resolves via the normal (populated) slot, but hermes-engine points
+    // at a SEPARATE cache dir that only has a debug slot — its release slot is
+    // absent. The React-derived gate would pass; the per-target existence check
+    // must still refuse to repoint hermes-engine.
+    mkXcframework(
+      path.join(tmp, 'other', '1.0', 'debug', 'hermes-engine.xcframework'),
+      'hermes-engine',
+      [
+        {
+          id: 'ios-arm64_x86_64-simulator',
+          platform: 'ios',
+          variant: 'simulator',
+        },
+      ],
+      'HERMES-debug',
+    );
+    // Also place hermes in React's release slot so the slot-existence gate (xcfw
+    // check) passes and we reach the repoint for hermes-engine.
+    mkXcframework(
+      path.join(tmp, 'cache', '1.0', 'release', 'hermes-engine.xcframework'),
+      'hermes-engine',
+      [
+        {
+          id: 'ios-arm64_x86_64-simulator',
+          platform: 'ios',
+          variant: 'simulator',
+        },
+      ],
+      'HERMES-release',
+    );
+    const hermesLink = path.join(
+      appRoot,
+      'build',
+      'xcframeworks',
+      'hermes-engine.xcframework',
+    );
+    fs.symlinkSync(
+      path.join(tmp, 'other', '1.0', 'debug', 'hermes-engine.xcframework'),
+      hermesLink,
+    );
+
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: builtProducts,
+        platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+
+    // React repointed to release; hermes left at its (real) debug pin, not a
+    // dangling link into other/1.0/release.
+    expect(pinnedSlot()).toBe('release');
+    expect(path.basename(path.dirname(fs.readlinkSync(hermesLink)))).toBe(
+      'debug',
+    );
+    expect(fs.existsSync(fs.readlinkSync(hermesLink))).toBe(true);
+    expect(logs.some(m => /slot missing for hermes-engine/.test(m))).toBe(true);
+  });
+
+  it('is idempotent — repointing twice equals once', () => {
+    const opts = {
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    };
+    swapFlavorFrameworks(opts);
+    const afterFirst = fs.readlinkSync(slotLink());
+    const inodeFirst = fs.lstatSync(slotLink()).ino;
+    swapFlavorFrameworks(opts);
+    expect(fs.readlinkSync(slotLink())).toBe(afterFirst);
+    // Matched flavor on the second pass → no unlink/symlink, inode unchanged.
+    expect(fs.lstatSync(slotLink()).ino).toBe(inodeFirst);
+    expect(pinnedSlot()).toBe('release');
+    expect(embedded()).toBe('REACT-release');
+  });
+
+  // --- Autolinking-plugin flavored artifacts (sidecar-driven) ---
+  const autolinkingDir = () =>
+    path.join(appRoot, 'build', 'generated', 'autolinking');
+  const writeSidecar = entries => {
+    fs.mkdirSync(autolinkingDir(), {recursive: true});
+    fs.writeFileSync(
+      path.join(autolinkingDir(), '.spm-plugin-flavored-artifacts.json'),
+      JSON.stringify(entries),
+    );
+  };
+  // A plugin-flavor xcframework under tmp/plugin/<flavor>/<name>.xcframework.
+  const mkPluginXcfw = (flavor, name, content) => {
+    const dir = path.join(tmp, 'plugin', flavor, `${name}.xcframework`);
+    mkXcframework(
+      dir,
+      name,
+      [
+        {
+          id: 'ios-arm64_x86_64-simulator',
+          platform: 'ios',
+          variant: 'simulator',
+        },
+      ],
+      content,
+    );
+    return dir;
+  };
+  // The plugin-owned symlink at <autolinking>/<name>/artifacts/<name>.xcframework.
+  const mkPluginLink = (name, targetXcfw) => {
+    const dir = path.join(autolinkingDir(), name, 'artifacts');
+    fs.mkdirSync(dir, {recursive: true});
+    const link = path.join(dir, `${name}.xcframework`);
+    fs.symlinkSync(targetXcfw, link);
+    return link;
+  };
+  const linkFlavor = link => path.basename(path.dirname(fs.readlinkSync(link)));
+
+  it('repoints a plugin artifact (and its products copy) to the release flavor', () => {
+    const dbg = mkPluginXcfw('debug', 'ExpoModulesCore', 'EXPO-debug');
+    const rel = mkPluginXcfw('release', 'ExpoModulesCore', 'EXPO-release');
+    const link = mkPluginLink('ExpoModulesCore', dbg); // plugin pins debug
+    writeSidecar([
+      {name: 'ExpoModulesCore', link, flavors: {debug: dbg, release: rel}},
+    ]);
+    // A materialized copy the Link step consumes.
+    const copy = path.join(builtProducts, 'ExpoModulesCore.framework');
+    fs.mkdirSync(copy, {recursive: true});
+    fs.writeFileSync(path.join(copy, 'ExpoModulesCore'), 'EXPO-debug');
+
+    const logs = [];
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+      logger: {log: m => logs.push(m)},
+    });
+
+    expect(linkFlavor(link)).toBe('release'); // embed source repointed
+    expect(read(path.join(copy, 'ExpoModulesCore'))).toBe('EXPO-release'); // copy
+    // Summary reports the plugin repoint count (React + plugin repointed).
+    expect(logs.some(m => /\(1 plugin\)/.test(m))).toBe(true);
+  });
+
+  it('warns and leaves a plugin link alone when the requested flavor is not built (no wrong-flavor pin)', () => {
+    // Only `release` is declared (and not built); the link is parked on an
+    // undeclared debug path, so there is no "pinned to the other flavor" mix.
+    const parked = mkPluginXcfw('debug', 'PluginA', 'A-debug');
+    const rel = path.join(tmp, 'plugin', 'release', 'PluginA.xcframework'); // absent
+    const link = mkPluginLink('PluginA', parked);
+    writeSidecar([{name: 'PluginA', link, flavors: {release: rel}}]);
+
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: builtProducts,
+        platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+
+    expect(linkFlavor(link)).toBe('debug'); // untouched
+    expect(logs.some(m => /PluginA: release flavor not built/.test(m))).toBe(
+      true,
+    );
+    expect(logs.some(m => /^error:/.test(m))).toBe(false); // no certain-mix
+  });
+
+  it('emits an error: line when the requested flavor is not built and the link is pinned to the other flavor', () => {
+    const dbg = mkPluginXcfw('debug', 'PluginB', 'B-debug');
+    const rel = path.join(tmp, 'plugin', 'release', 'PluginB.xcframework'); // absent
+    const link = mkPluginLink('PluginB', dbg); // pinned to debug (declared)
+    writeSidecar([
+      {name: 'PluginB', link, flavors: {debug: dbg, release: rel}},
+    ]);
+
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: builtProducts,
+        platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+
+    expect(linkFlavor(link)).toBe('debug'); // untouched
+    expect(logs.some(m => /PluginB: release flavor not built/.test(m))).toBe(
+      true,
+    );
+    expect(
+      logs.some(m =>
+        /^error: swap-flavor: PluginB is pinned to the debug/.test(m),
+      ),
+    ).toBe(true);
+  });
+
+  it('warns and skips a plugin entry whose link is not a symlink (plugin owns creation)', () => {
+    const dbg = mkPluginXcfw('debug', 'PluginC', 'C-debug');
+    const rel = mkPluginXcfw('release', 'PluginC', 'C-release');
+    // A real directory where the symlink should be.
+    const dir = path.join(autolinkingDir(), 'PluginC', 'artifacts');
+    fs.mkdirSync(dir, {recursive: true});
+    const link = path.join(dir, 'PluginC.xcframework');
+    fs.mkdirSync(link, {recursive: true});
+    writeSidecar([
+      {name: 'PluginC', link, flavors: {debug: dbg, release: rel}},
+    ]);
+
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: builtProducts,
+        platformName: 'iphonesimulator',
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(false); // untouched
+    expect(logs.some(m => /PluginC: no plugin-owned symlink/.test(m))).toBe(
+      true,
+    );
+  });
+
+  it('is silent about plugins when the sidecar is absent', () => {
+    const logs = [];
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+      logger: {log: m => logs.push(m)},
+    });
+    // Only the RN-builtin summary; no plugin-specific chatter, count is (0 plugin).
+    expect(logs.some(m => /\(0 plugin\)/.test(m))).toBe(true);
+    expect(logs.some(m => /flavor not built|no plugin-owned/.test(m))).toBe(
+      false,
+    );
+  });
+
+  // --- Embedded-copy correction inside the .app bundle (deterministic fix) ---
+  const codesignCalls = () =>
+    (globalThis.__spmExecCalls || []).filter(c => c.cmd === 'codesign');
+  // Materializes the framework Xcode embedded into the .app; returns paths.
+  const mkEmbedded = () => {
+    const targetBuildDir = path.join(tmp, 'target');
+    const frameworksFolderPath = 'MyApp.app/Frameworks';
+    const fwDir = path.join(
+      targetBuildDir,
+      frameworksFolderPath,
+      'React.framework',
+    );
+    fs.mkdirSync(fwDir, {recursive: true});
+    fs.writeFileSync(path.join(fwDir, 'React'), 'REACT-debug');
+    return {targetBuildDir, frameworksFolderPath, fwDir};
+  };
+
+  it('rsyncs the embedded .app copy and re-codesigns it (Release)', () => {
+    const {targetBuildDir, frameworksFolderPath, fwDir} = mkEmbedded();
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+      targetBuildDir,
+      frameworksFolderPath,
+      expandedCodeSignIdentity: 'ABC123',
+    });
+    expect(read(path.join(fwDir, 'React'))).toBe('REACT-release');
+    const cs = codesignCalls();
+    expect(cs).toHaveLength(1);
+    expect(cs[0].args).toEqual([
+      '--force',
+      '--preserve-metadata=identifier,entitlements,flags',
+      '--sign',
+      'ABC123',
+      fwDir,
+    ]);
+  });
+
+  it('re-codesigns with the ad-hoc "-" identity when none is set (simulator)', () => {
+    const {targetBuildDir, frameworksFolderPath} = mkEmbedded();
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+      targetBuildDir,
+      frameworksFolderPath,
+    });
+    const cs = codesignCalls();
+    expect(cs).toHaveLength(1);
+    expect(cs[0].args[3]).toBe('-');
+  });
+
+  it('skips codesign when CODE_SIGNING_ALLOWED=NO (but still corrects the copy)', () => {
+    const {targetBuildDir, frameworksFolderPath, fwDir} = mkEmbedded();
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+      targetBuildDir,
+      frameworksFolderPath,
+      codeSigningAllowed: 'NO',
+    });
+    expect(read(path.join(fwDir, 'React'))).toBe('REACT-release'); // corrected
+    expect(codesignCalls()).toHaveLength(0); // but not signed
+  });
+
+  it('does not touch an embedded copy when the env vars are absent', () => {
+    const {fwDir} = mkEmbedded();
+    swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+      // no targetBuildDir / frameworksFolderPath
+    });
+    expect(read(path.join(fwDir, 'React'))).toBe('REACT-debug'); // untouched
+    expect(codesignCalls()).toHaveLength(0);
+  });
+
+  it('is non-fatal when codesign fails', () => {
+    globalThis.__spmCodesignThrows = true;
+    const {targetBuildDir, frameworksFolderPath, fwDir} = mkEmbedded();
+    const logs = [];
+    expect(() =>
+      swapFlavorFrameworks({
+        appRoot,
+        configuration: 'Release',
+        builtProductsDir: builtProducts,
+        platformName: 'iphonesimulator',
+        targetBuildDir,
+        frameworksFolderPath,
+        logger: {log: m => logs.push(m)},
+      }),
+    ).not.toThrow();
+    // The copy is still corrected; the failure is logged, not thrown.
+    expect(read(path.join(fwDir, 'React'))).toBe('REACT-release');
+    expect(logs.some(m => /codesign failed/.test(m))).toBe(true);
   });
 });

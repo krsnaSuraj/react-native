@@ -437,6 +437,30 @@ function ensureScalarField(
   const block = `\n${fieldIndent}${key} = ${value};`;
   return text.slice(0, obj.bodyOpen + 1) + block + text.slice(obj.bodyOpen + 1);
 }
+
+/**
+ * Set a scalar field's value, UNLIKE ensureScalarField this overwrites an
+ * existing value in place rather than leaving it alone — used by fields the
+ * injector itself owns (e.g. the generated `shellScript`) that must be kept
+ * in sync on re-injection. When the field is present, only the value token
+ * (`findField`'s `valueStart..tokenEnd` range — the trailing `;` is NOT part
+ * of that range and is preserved untouched) is replaced in place, so field
+ * order never shifts and passing the same `value` again yields
+ * byte-identical output. Falls back to `ensureScalarField`'s append-after-`{`
+ * behavior when the field is absent.
+ */
+function setScalarField(
+  text /*: string */,
+  obj /*: BodyRange */,
+  key /*: string */,
+  value /*: string */,
+) /*: string */ {
+  const field = findField(text, obj, key);
+  if (field != null) {
+    return text.slice(0, field.valueStart) + value + text.slice(field.tokenEnd);
+  }
+  return ensureScalarField(text, obj, key, value);
+}
 // ---------------------------------------------------------------------------
 // Surgical removal — the inverse of the additive helpers above. `deinit` uses
 // these to undo exactly what injection added, leaving every other byte (incl.
@@ -618,6 +642,7 @@ module.exports = {
   addArrayMembers,
   addArrayStringValues,
   ensureScalarField,
+  setScalarField,
   escapeRegExp,
   // Surgical removal (deinit):
   removeObjectByUuid,

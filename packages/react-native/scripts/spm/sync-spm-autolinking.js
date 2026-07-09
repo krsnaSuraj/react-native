@@ -25,11 +25,15 @@
  *
  * This script:
  *   0. Runs react-native codegen → build/generated/ios/ (reuses autolinking.json)
- *   1. Ensures xcframework artifacts are downloaded (auto-heals fresh clones)
- *   2. Calls generate-spm-autolinking.js → build/generated/autolinking/Package.swift
- *   3. Calls generate-spm-package.js → build/xcframeworks/Package.swift + symlinks
- *   4. Installs the codegen template + rebuilds the generated-headers farm
- *   5. Writes build/generated/autolinking/.spm-sync-stamp
+ *   1. Installs the codegen template into build/generated/ios/Package.swift,
+ *      replacing codegen's mis-rooted default (done immediately, before any
+ *      step below that can throw — see the failure-atomicity comment at the
+ *      call site)
+ *   2. Ensures xcframework artifacts are downloaded (auto-heals fresh clones)
+ *   3. Calls generate-spm-autolinking.js → build/generated/autolinking/Package.swift
+ *   4. Calls generate-spm-package.js → build/xcframeworks/Package.swift + symlinks
+ *   5. Rebuilds the generated-headers farm
+ *   6. Writes build/generated/autolinking/.spm-sync-stamp
  */
 
 const {
@@ -78,6 +82,31 @@ function decideSyncPlan(
   };
 }
 
+/**
+ * The flavor a prior `spm add`/sync pinned this app to, read from the
+ * `<appRoot>/build/xcframeworks/React.xcframework` slot symlink's parent-dir
+ * segment (`.../<version>/<flavor>/React.xcframework`). Absent / unreadable / an
+ * unrecognized segment → 'debug' (the add-time default). Preserving the pin
+ * stops a Release-pinned app's sync from stomping it back to debug (the
+ * build-time swap-flavor then still flips per $CONFIGURATION on top of this).
+ */
+function deriveFlavorFromPin(appRoot /*: string */) /*: 'debug' | 'release' */ {
+  const link = path.join(appRoot, 'build', 'xcframeworks', 'React.xcframework');
+  try {
+    const resolved = path.resolve(path.dirname(link), fs.readlinkSync(link));
+    const segment = path.basename(path.dirname(resolved)).toLowerCase();
+    if (segment === 'release') {
+      return 'release';
+    }
+    if (segment === 'debug') {
+      return 'debug';
+    }
+  } catch {
+    // No symlink yet / unreadable — fall through to the default.
+  }
+  return 'debug';
+}
+
 // Collaborators are injected (with these real implementations as defaults) so
 // main() can be exercised end-to-end in tests without mocking the module
 // system. Tests pass fakes that record calls and point defaultCacheDir at a
@@ -94,6 +123,7 @@ const defaultDeps = {
   installSpmCodegenTemplate,
   buildPerAppHeaderTree,
   findProjectRoot,
+  deriveFlavorFromPin,
 };
 
 async function main(
@@ -121,10 +151,7 @@ async function main(
   const projectRoot = deps.findProjectRoot(appRoot);
 
   // The caller (setup-apple-spm.js) already generated autolinking.json before
-  // invoking this script, so codegen reuses it here. Defer the codegen template
-  // install until after generate-spm-package re-points the xcframework symlinks
-  // (see installSpmCodegenTemplate call below) — installing it now would write a
-  // template that the post-symlink install immediately supersedes.
+  // invoking this script, so codegen reuses it here.
   try {
     deps.runCodegenAndInstallTemplate(
       projectRoot,
@@ -139,9 +166,21 @@ async function main(
     log('Codegen failed — continuing with existing output');
   }
 
+  // Install the codegen template right away, before artifact download and
+  // autolinking-plugin execution below. Failure-atomicity: generateAutolinking
+  // runs fail-closed plugins that can throw, and if that happens before the
+  // template is installed, codegen's mis-rooted default manifest is left in
+  // build/generated/ios/Package.swift — breaking every subsequent Xcode
+  // "Resolve Package Graph". Installing it immediately after codegen means a
+  // later throw can never leave that broken manifest in place.
+  deps.installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
+
   const pkg = deps.readPackageJson(reactNativeRoot);
   const rawVersion = pkg?.version ?? '0.0.0';
-  const flavor = 'debug';
+  // Preserve the flavor this app was pinned to (Release-pinned apps must not be
+  // stomped back to debug by a sync) — the build-time swap-flavor still flips
+  // the embedded/linked flavor per $CONFIGURATION on top of this.
+  const flavor = deps.deriveFlavorFromPin(appRoot);
 
   // Resolve the cache slot for the current RN version. For dev / nightly
   // labels this is the actual nightly hash, so we look at the right slot
@@ -203,9 +242,6 @@ async function main(
     ]);
   }
 
-  // (Re)install the static codegen template now that build/generated/ios is finalized.
-  deps.installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
-
   // Rebuild the per-app generated-headers farm (vended as the ReactAppHeaders
   // SPM target inside the codegen package). React core headers need no trees
   // — they live inside the composed artifacts (see generate-spm-package). The
@@ -240,4 +276,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = {main, decideSyncPlan};
+module.exports = {main, decideSyncPlan, deriveFlavorFromPin};

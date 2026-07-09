@@ -196,4 +196,115 @@ describe('invokePlugins', () => {
       ),
     ).toThrow(/productDependency needing name \+ package/);
   });
+
+  it('merges valid flavoredArtifacts', () => {
+    const res = invokePlugins(
+      [
+        mk('expo', () => ({
+          flavoredArtifacts: [
+            {
+              name: 'ExpoModulesCore',
+              link: '/o/ExpoModulesCore/artifacts/ExpoModulesCore.xcframework',
+              flavors: {
+                debug: '/o/debug/ExpoModulesCore.xcframework',
+                release: '/o/release/ExpoModulesCore.xcframework',
+              },
+            },
+          ],
+        })),
+      ],
+      ctx,
+    );
+    expect(res.flavoredArtifacts).toEqual([
+      {
+        name: 'ExpoModulesCore',
+        link: '/o/ExpoModulesCore/artifacts/ExpoModulesCore.xcframework',
+        flavors: {
+          debug: '/o/debug/ExpoModulesCore.xcframework',
+          release: '/o/release/ExpoModulesCore.xcframework',
+        },
+      },
+    ]);
+  });
+
+  it('accepts a flavoredArtifact with only one flavor present', () => {
+    const res = invokePlugins(
+      [
+        mk('expo', () => ({
+          flavoredArtifacts: [
+            {name: 'A', link: '/o/A.xcframework', flavors: {debug: '/d/A'}},
+          ],
+        })),
+      ],
+      ctx,
+    );
+    expect(res.flavoredArtifacts).toEqual([
+      {name: 'A', link: '/o/A.xcframework', flavors: {debug: '/d/A'}},
+    ]);
+  });
+
+  it('drops invalid flavoredArtifacts with a per-entry warning (not fatal)', () => {
+    const warnings = [];
+    const res = invokePlugins(
+      [
+        mk('expo', () => ({
+          flavoredArtifacts: [
+            {name: '', link: '/o/x', flavors: {debug: '/d'}}, // empty name
+            {name: 'B', link: '', flavors: {debug: '/d'}}, // empty link
+            {name: 'C', link: '/o/c', flavors: {debug: 5}}, // non-string flavor
+            {name: 'D', link: '/o/d'}, // missing flavors
+            {name: 'OK', link: '/o/ok', flavors: {release: '/r/ok'}}, // valid
+          ],
+        })),
+      ],
+      ctx,
+      {warn: m => warnings.push(m)},
+    );
+    expect(res.flavoredArtifacts).toEqual([
+      {name: 'OK', link: '/o/ok', flavors: {release: '/r/ok'}},
+    ]);
+    expect(warnings).toHaveLength(4);
+    expect(warnings.every(w => /invalid flavoredArtifact/.test(w))).toBe(true);
+  });
+
+  it('dedupes flavoredArtifacts by name across plugins', () => {
+    const res = invokePlugins(
+      [
+        mk('a', () => ({
+          flavoredArtifacts: [
+            {name: 'Dup', link: '/a/Dup', flavors: {debug: '/a/d'}},
+          ],
+        })),
+        mk('b', () => ({
+          flavoredArtifacts: [
+            {name: 'Dup', link: '/b/Dup', flavors: {debug: '/b/d'}},
+          ],
+        })),
+      ],
+      ctx,
+    );
+    expect(res.flavoredArtifacts).toHaveLength(1);
+    expect(res.flavoredArtifacts[0].link).toBe('/a/Dup');
+  });
+
+  it('defaults flavoredArtifacts to [] when no plugin declares any', () => {
+    const res = invokePlugins([mk('a', () => ({}))], ctx);
+    expect(res.flavoredArtifacts).toEqual([]);
+  });
+
+  it('ignores a non-array flavoredArtifacts with a warning (never throws)', () => {
+    const warnings = [];
+    let res;
+    expect(() => {
+      res = invokePlugins(
+        [mk('expo', () => ({flavoredArtifacts: {name: 'X'}}))], // object, not array
+        ctx,
+        {warn: m => warnings.push(m)},
+      );
+    }).not.toThrow();
+    expect(res.flavoredArtifacts).toEqual([]);
+    expect(warnings.some(w => /non-array flavoredArtifacts/.test(w))).toBe(
+      true,
+    );
+  });
 });

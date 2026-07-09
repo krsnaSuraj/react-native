@@ -16,6 +16,7 @@
   AutolinkingArgs,
   DiscoveredPlugin,
   NpmDepRef,
+  PluginFlavoredArtifact,
   PluginPackageDep,
   PluginProductDep,
   ReactDescriptor,
@@ -73,7 +74,7 @@ const fs = require('fs');
 const path = require('path');
 const yargs = require('yargs');
 
-const {log} = makeLogger('generate-spm-autolinking');
+const {log, warn} = makeLogger('generate-spm-autolinking');
 
 // Targets compiling against React get all headers via SPM product
 // dependencies — no search-path flags: React/react namespaces from the React
@@ -1684,6 +1685,7 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   let pluginPackageDeps /*: Array<PluginPackageDep> */ = [];
   let pluginProductDeps /*: Array<PluginProductDep> */ = [];
   let pluginGeneratedSources /*: Array<{path: string}> */ = [];
+  let pluginFlavoredArtifacts /*: Array<PluginFlavoredArtifact> */ = [];
   if (discoveredPlugins.length > 0) {
     // React-GeneratedCode is the per-app codegen package (referenced as
     // `../ios` from outputDir). It may be absent (no codegen this run), so the
@@ -1691,26 +1693,32 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     const codegenPackageExists = fs.existsSync(
       path.join(outputDir, '..', 'ios', 'Package.swift'),
     );
-    const result = invokePlugins(discoveredPlugins, {
-      appRoot,
-      projectRoot: findProjectRoot(appRoot),
-      reactNativeRoot: rnRoot,
-      autolinking: autolinkingData ?? {},
-      outputDir,
-      flavor: args.flavor,
-      react: reactDescriptor(
-        absXcframeworks,
-        xcframeworksRelPath,
-        codegenPackageExists,
-      ),
-    });
+    const result = invokePlugins(
+      discoveredPlugins,
+      {
+        appRoot,
+        projectRoot: findProjectRoot(appRoot),
+        reactNativeRoot: rnRoot,
+        autolinking: autolinkingData ?? {},
+        outputDir,
+        flavor: args.flavor,
+        react: reactDescriptor(
+          absXcframeworks,
+          xcframeworksRelPath,
+          codegenPackageExists,
+        ),
+      },
+      {warn},
+    );
     pluginPackageDeps = result.packageDependencies;
     pluginProductDeps = result.productDependencies;
     pluginGeneratedSources = result.generatedSources;
+    pluginFlavoredArtifacts = result.flavoredArtifacts;
     log(
       `SPM plugins contributed ${pluginPackageDeps.length} package(s), ` +
         `${pluginProductDeps.length} product(s), ` +
-        `${pluginGeneratedSources.length} generated source(s)`,
+        `${pluginGeneratedSources.length} generated source(s), ` +
+        `${pluginFlavoredArtifacts.length} flavored artifact(s)`,
     );
     // Generated-source registration (e.g. Expo's ExpoModulesProvider.swift) is
     // consumed by the codegen step via this manifest — the provider ordering
@@ -1723,6 +1731,19 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       );
     }
   }
+
+  // Flavored-artifact sidecar for the build-time swap-flavor pass. ALWAYS
+  // written — even `[]` — so removing a plugin (or dropping its declaration)
+  // clears stale entries and swap-flavor stops repointing a now-gone link. This
+  // differs from the generated-sources sidecar above (written only when
+  // non-empty) by design. Machine-local absolute paths; gitignored + regenerated
+  // every sync, same as the other sidecars.
+  fs.mkdirSync(outputDir, {recursive: true});
+  fs.writeFileSync(
+    path.join(outputDir, '.spm-plugin-flavored-artifacts.json'),
+    JSON.stringify(pluginFlavoredArtifacts, null, 2) + '\n',
+    'utf8',
+  );
 
   // Top-level aggregator: references every entry as .package(path:) and
   // depends on each via .product(...). No more inline targets — every

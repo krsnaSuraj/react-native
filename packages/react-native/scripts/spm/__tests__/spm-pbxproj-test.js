@@ -30,6 +30,7 @@ const {
   removeObjectByUuid,
   scanToClose,
   serializeEntry,
+  setScalarField,
   uuidsInArray,
 } = require('../spm-pbxproj');
 const fs = require('fs');
@@ -240,6 +241,71 @@ describe('ensureScalarField', () => {
     expect(ensureScalarField(out, project2, 'ORGANIZATIONNAME', 'Other')).toBe(
       out,
     );
+  });
+});
+
+describe('setScalarField', () => {
+  it('replaces an existing value in place, preserving field order', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    const withOrg = ensureScalarField(
+      PLAIN_PBXPROJ,
+      project,
+      'ORGANIZATIONNAME',
+      'Acme',
+    );
+    const before = withOrg.indexOf('ORGANIZATIONNAME');
+    const project2 = findProjectObject(withOrg);
+    const out = setScalarField(withOrg, project2, 'ORGANIZATIONNAME', 'Other');
+    expect(out).toContain('ORGANIZATIONNAME = Other;');
+    expect(out).not.toContain('ORGANIZATIONNAME = Acme;');
+    // Field stayed at the same position — no remove+re-append shuffling.
+    expect(out.indexOf('ORGANIZATIONNAME')).toBe(before);
+  });
+
+  it('is byte-identical when the value is unchanged', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    const withOrg = ensureScalarField(
+      PLAIN_PBXPROJ,
+      project,
+      'ORGANIZATIONNAME',
+      'Acme',
+    );
+    const project2 = findProjectObject(withOrg);
+    const out = setScalarField(withOrg, project2, 'ORGANIZATIONNAME', 'Acme');
+    expect(out).toBe(withOrg);
+  });
+
+  it('appends the field when absent, like ensureScalarField', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    const out = setScalarField(
+      PLAIN_PBXPROJ,
+      project,
+      'ORGANIZATIONNAME',
+      'Acme',
+    );
+    expect(out).toContain('ORGANIZATIONNAME = Acme;');
+    expect(
+      ensureScalarField(PLAIN_PBXPROJ, project, 'ORGANIZATIONNAME', 'Acme'),
+    ).toBe(out);
+  });
+
+  it('preserves a quoted value fully, including its quotes', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    const withScript = ensureScalarField(
+      PLAIN_PBXPROJ,
+      project,
+      'SOME_SCRIPT',
+      '"echo hi"',
+    );
+    const project2 = findProjectObject(withScript);
+    const out = setScalarField(
+      withScript,
+      project2,
+      'SOME_SCRIPT',
+      '"echo bye"',
+    );
+    expect(out).toContain('SOME_SCRIPT = "echo bye";');
+    expect(out).not.toContain('echo hi');
   });
 });
 

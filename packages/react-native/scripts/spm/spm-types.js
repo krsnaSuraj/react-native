@@ -16,6 +16,14 @@ export type SetupArgs = {
   // (no download); a directory → cache dir (read if populated, download there
   // if empty). Replaces the old --local-xcframework + --artifacts-dir pair.
   artifacts: string | null,
+  // The EXPLICIT --flavor request, or null when the flag was omitted. Kept
+  // separate from `flavor` (below) so main() can tell "the user asked for
+  // this" apart from "nothing was requested" when resolving the flavor to
+  // use — see resolveFlavor in setup-apple-spm.js.
+  explicitFlavor: string | null,
+  // The RESOLVED artifact flavor for this run ('debug' | 'release'). Not
+  // meaningful until main() calls resolveFlavor(args.explicitFlavor, appRoot)
+  // and assigns the result here, before any downstream consumer reads it.
   flavor: string,
   skipCodegen: boolean,
   // Artifact download policy: 'auto' fetches when missing, 'skip' never

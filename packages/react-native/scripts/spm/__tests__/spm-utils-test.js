@@ -15,8 +15,10 @@ const {
   buildPerAppHeaderTree,
   defaultCacheDir,
   displayPath,
+  flavorFromConfiguration,
   isPublishableVersion,
   makeLogger,
+  readFlavorPin,
   readPackageJson,
   remotePackageConfig,
   resolveInstalledRnVersion,
@@ -617,5 +619,113 @@ describe('per-app header farm (ReactAppHeaders SPM target)', () => {
       fs.existsSync(path.join(appRoot, 'build', '.react-app-headers.tmp')),
     ).toBe(false);
     expect(second.virtualPaths.has('MyLib/Provider.h')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readFlavorPin — null-returning pin-read contract (F1). Distinguishes "no pin
+// exists yet" (fresh app) from "pinned debug"; callers pick their own fallback.
+// ---------------------------------------------------------------------------
+
+describe('readFlavorPin', () => {
+  let appRoot;
+  beforeEach(() => {
+    appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-readpin-'));
+  });
+  afterEach(() => fs.rmSync(appRoot, {recursive: true, force: true}));
+
+  const pin = target => {
+    const dir = path.join(appRoot, 'build', 'xcframeworks');
+    fs.mkdirSync(dir, {recursive: true});
+    fs.symlinkSync(target, path.join(dir, 'React.xcframework'));
+  };
+
+  it('reads "release" from a release-pinned slot symlink', () => {
+    pin(path.join(appRoot, 'cache', '1.0', 'release', 'React.xcframework'));
+    expect(readFlavorPin(appRoot)).toBe('release');
+  });
+
+  it('reads "debug" from a debug-pinned slot symlink', () => {
+    pin(path.join(appRoot, 'cache', '1.0', 'debug', 'React.xcframework'));
+    expect(readFlavorPin(appRoot)).toBe('debug');
+  });
+
+  it('returns null (not "debug") when the slot symlink is absent', () => {
+    expect(readFlavorPin(appRoot)).toBeNull();
+  });
+
+  it('returns null for an unrecognized flavor segment', () => {
+    pin(path.join(appRoot, 'cache', '1.0', 'weird', 'React.xcframework'));
+    expect(readFlavorPin(appRoot)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// flavorFromConfiguration — Xcode's own custom-configuration-name mapping rule
+// (F2), plus the RN_SPM_FLAVOR escape hatch.
+// ---------------------------------------------------------------------------
+
+describe('flavorFromConfiguration', () => {
+  const ORIGINAL_ENV = process.env.RN_SPM_FLAVOR;
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) {
+      delete process.env.RN_SPM_FLAVOR;
+    } else {
+      process.env.RN_SPM_FLAVOR = ORIGINAL_ENV;
+    }
+  });
+
+  it('maps "Release" to release', () => {
+    delete process.env.RN_SPM_FLAVOR;
+    expect(flavorFromConfiguration('Release')).toBe('release');
+  });
+
+  it('maps "Debug" to debug', () => {
+    delete process.env.RN_SPM_FLAVOR;
+    expect(flavorFromConfiguration('Debug')).toBe('debug');
+  });
+
+  it('maps a custom config name like "Staging" to release (name-match rule)', () => {
+    delete process.env.RN_SPM_FLAVOR;
+    expect(flavorFromConfiguration('Staging')).toBe('release');
+  });
+
+  it('maps a config name containing "development" to debug', () => {
+    delete process.env.RN_SPM_FLAVOR;
+    expect(flavorFromConfiguration('Development')).toBe('debug');
+    expect(flavorFromConfiguration('MyDevelopmentConfig')).toBe('debug');
+  });
+
+  it('is case-insensitive', () => {
+    delete process.env.RN_SPM_FLAVOR;
+    expect(flavorFromConfiguration('DEBUG')).toBe('debug');
+    expect(flavorFromConfiguration('release')).toBe('release');
+  });
+
+  it('returns null for missing/empty configuration', () => {
+    delete process.env.RN_SPM_FLAVOR;
+    expect(flavorFromConfiguration(null)).toBeNull();
+    expect(flavorFromConfiguration(undefined)).toBeNull();
+    expect(flavorFromConfiguration('')).toBeNull();
+  });
+
+  it('RN_SPM_FLAVOR=release overrides a debug-matching configuration', () => {
+    process.env.RN_SPM_FLAVOR = 'release';
+    expect(flavorFromConfiguration('Debug')).toBe('release');
+  });
+
+  it('RN_SPM_FLAVOR=debug overrides a release-matching configuration', () => {
+    process.env.RN_SPM_FLAVOR = 'debug';
+    expect(flavorFromConfiguration('Release')).toBe('debug');
+  });
+
+  it('ignores an invalid RN_SPM_FLAVOR value (warns) and falls back to name-match', () => {
+    process.env.RN_SPM_FLAVOR = 'nonsense';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(flavorFromConfiguration('Release')).toBe('release');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('RN_SPM_FLAVOR'),
+    );
+    warnSpy.mockRestore();
   });
 });

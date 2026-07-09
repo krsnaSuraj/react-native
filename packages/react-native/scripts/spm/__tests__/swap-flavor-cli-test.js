@@ -128,6 +128,19 @@ describe('swap-flavor CLI action — HARD-FAIL + CONVERGE exit codes', () => {
     expect(pinnedFlavor()).toBe('debug');
   });
 
+  it('exits 1 when a custom configuration ("Staging") starts on the debug pin (name-match -> release)', () => {
+    const products = path.join(tmp, 'products');
+    fs.mkdirSync(products, {recursive: true});
+    const {code, out} = runSwap({
+      CONFIGURATION: 'Staging',
+      BUILT_PRODUCTS_DIR: products,
+      PLATFORM_NAME: 'iphonesimulator',
+    });
+    expect(code).toBe(1);
+    expect(out).toMatch(/switched to release/i);
+    expect(pinnedFlavor()).toBe('release');
+  });
+
   it('exits 0 (no hard-fail) in the pre-action context — no BUILT_PRODUCTS_DIR — but still repoints', () => {
     const {code, out} = runSwap({
       CONFIGURATION: 'Release',

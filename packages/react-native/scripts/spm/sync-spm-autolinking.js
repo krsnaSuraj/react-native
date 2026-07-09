@@ -49,8 +49,10 @@ const {
   defaultCacheDir,
   displayPath,
   findProjectRoot,
+  flavorFromConfiguration,
   installSpmCodegenTemplate,
   makeLogger,
+  readFlavorPin,
   readPackageJson,
   remotePackageConfig,
   runCodegenAndInstallTemplate,
@@ -86,26 +88,18 @@ function decideSyncPlan(
 /**
  * The flavor a prior `spm add`/sync pinned this app to, read from the
  * `<appRoot>/build/xcframeworks/React.xcframework` slot symlink's parent-dir
- * segment (`.../<version>/<flavor>/React.xcframework`). Absent / unreadable / an
- * unrecognized segment → 'debug' (the add-time default). Preserving the pin
- * stops a Release-pinned app's sync from stomping it back to debug (the
- * build-time swap-flavor then still flips per $CONFIGURATION on top of this).
+ * segment (`.../<version>/<flavor>/React.xcframework`). Thin re-export of
+ * spm-utils' readFlavorPin (kept under this name for back-compat / the
+ * existing test suite): null when no pin exists yet (fresh app) or the
+ * segment isn't recognized — callers decide the fallback. Preserving an
+ * existing pin stops a Release-pinned app's sync from stomping it back to
+ * debug (the build-time swap-flavor then still flips per $CONFIGURATION on
+ * top of this).
  */
-function deriveFlavorFromPin(appRoot /*: string */) /*: 'debug' | 'release' */ {
-  const link = path.join(appRoot, 'build', 'xcframeworks', 'React.xcframework');
-  try {
-    const resolved = path.resolve(path.dirname(link), fs.readlinkSync(link));
-    const segment = path.basename(path.dirname(resolved)).toLowerCase();
-    if (segment === 'release') {
-      return 'release';
-    }
-    if (segment === 'debug') {
-      return 'debug';
-    }
-  } catch {
-    // No symlink yet / unreadable — fall through to the default.
-  }
-  return 'debug';
+function deriveFlavorFromPin(
+  appRoot /*: string */,
+) /*: 'debug' | 'release' | null */ {
+  return readFlavorPin(appRoot);
 }
 
 // Collaborators are injected (with these real implementations as defaults) so
@@ -125,6 +119,7 @@ const defaultDeps = {
   buildPerAppHeaderTree,
   findProjectRoot,
   deriveFlavorFromPin,
+  flavorFromConfiguration,
   readArtifactsVersionOverride,
 };
 
@@ -193,8 +188,15 @@ async function main(
   }
   // Preserve the flavor this app was pinned to (Release-pinned apps must not be
   // stomped back to debug by a sync) — the build-time swap-flavor still flips
-  // the embedded/linked flavor per $CONFIGURATION on top of this.
-  const flavor = deps.deriveFlavorFromPin(appRoot);
+  // the embedded/linked flavor per $CONFIGURATION on top of this. A FRESH app
+  // (no pin yet) derives its first flavor from $CONFIGURATION instead of
+  // hardcoding debug, so a first build that happens to be Release doesn't
+  // needlessly hard-fail once for the wrong flavor; 'debug' is the final
+  // fallback when $CONFIGURATION is also unavailable.
+  const flavor =
+    deps.deriveFlavorFromPin(appRoot) ??
+    deps.flavorFromConfiguration(process.env.CONFIGURATION) ??
+    'debug';
 
   // Resolve the cache slot for the current RN version. For dev / nightly
   // labels this is the actual nightly hash, so we look at the right slot

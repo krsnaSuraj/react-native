@@ -380,6 +380,69 @@ function perAppHeadersDir(appRoot /*: string */) /*: string */ {
 }
 
 /**
+ * Reads the flavor a prior `spm add`/`update`/sync pinned this app to, from
+ * the `<appRoot>/build/xcframeworks/React.xcframework` slot symlink's
+ * parent-dir segment (`.../<version>/<flavor>/React.xcframework`). Returns
+ * null — NOT a default — when no pin exists yet (symlink absent/unreadable)
+ * or the segment isn't a recognized flavor, so callers can distinguish "no
+ * pin yet" (fresh app) from "pinned debug" and choose their own fallback
+ * (e.g. the existing $CONFIGURATION-derived flavor, or 'debug').
+ */
+function readFlavorPin(appRoot /*: string */) /*: 'debug' | 'release' | null */ {
+  const link = path.join(appRoot, 'build', 'xcframeworks', 'React.xcframework');
+  try {
+    const resolved = path.resolve(path.dirname(link), fs.readlinkSync(link));
+    const segment = path.basename(path.dirname(resolved)).toLowerCase();
+    if (segment === 'release') {
+      return 'release';
+    }
+    if (segment === 'debug') {
+      return 'debug';
+    }
+  } catch {
+    // No symlink yet / unreadable — no pin.
+  }
+  return null;
+}
+
+/**
+ * Maps an Xcode `$CONFIGURATION` name to the SwiftPM flavor a binaryTarget
+ * should use. SwiftPM can't branch a binaryTarget on the build configuration
+ * name itself — it only sees .debug/.release — and Xcode maps *custom*
+ * configuration names onto those two by a case-insensitive substring match on
+ * "debug"/"development" (anything else compiles as release). This mirrors
+ * that exact rule: a custom config like "Staging" must resolve to 'release'
+ * here too, or a debug-flavored artifact pin would silently mismatch what
+ * SwiftPM actually compiled.
+ *
+ * `RN_SPM_FLAVOR` is an escape hatch, checked FIRST, for teams whose config
+ * names defeat the name-match rule: set it to 'debug' or 'release' to force
+ * the answer. Any other value is ignored (with a warning) and the name-match
+ * rule still runs. Returns null (not a default) for a missing/empty
+ * configuration — the caller decides the ultimate fallback.
+ */
+function flavorFromConfiguration(
+  configuration /*: ?string */,
+) /*: 'debug' | 'release' | null */ {
+  const override = process.env.RN_SPM_FLAVOR;
+  if (override != null && override !== '') {
+    if (override === 'debug' || override === 'release') {
+      return override;
+    }
+    console.warn(
+      `warning: ignoring invalid RN_SPM_FLAVOR='${override}' (expected 'debug' or 'release')`,
+    );
+  }
+  if (configuration == null || configuration === '') {
+    return null;
+  }
+  const lower = configuration.toLowerCase();
+  return lower.includes('debug') || lower.includes('development')
+    ? 'debug'
+    : 'release';
+}
+
+/**
  * Creates a first-wins symlink linker rooted at `outDir`. `linkInto` maps a
  * virtual import path to a physical file; `foldDir` recursively links every
  * .h/.hpp under a source root. `seen` records virtual->realpath so identical
@@ -642,4 +705,6 @@ module.exports = {
   installSpmCodegenTemplate,
   runCodegenAndInstallTemplate,
   SCAFFOLDER_MARKER,
+  readFlavorPin,
+  flavorFromConfiguration,
 };

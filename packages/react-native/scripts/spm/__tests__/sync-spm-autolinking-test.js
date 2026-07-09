@@ -82,13 +82,18 @@ describe('deriveFlavorFromPin', () => {
     expect(deriveFlavorFromPin(appRoot)).toBe('debug');
   });
 
-  it('defaults to "debug" when the slot symlink is absent', () => {
-    expect(deriveFlavorFromPin(appRoot)).toBe('debug');
+  // DELIBERATE CONTRACT CHANGE (F2): deriveFlavorFromPin is now a null-returning
+  // pin-read (a thin re-export of spm-utils' readFlavorPin) — an absent symlink
+  // means "no pin yet", not "debug". main() below composes the fallback chain
+  // (pin -> $CONFIGURATION -> 'debug') on top of this. Was previously asserted
+  // to return 'debug' directly.
+  it('returns null (not "debug") when the slot symlink is absent', () => {
+    expect(deriveFlavorFromPin(appRoot)).toBeNull();
   });
 
-  it('defaults to "debug" for an unrecognized flavor segment', () => {
+  it('returns null for an unrecognized flavor segment', () => {
     pin(path.join(appRoot, 'cache', '1.0', 'weird', 'React.xcframework'));
-    expect(deriveFlavorFromPin(appRoot)).toBe('debug');
+    expect(deriveFlavorFromPin(appRoot)).toBeNull();
   });
 });
 
@@ -311,5 +316,72 @@ describe('main', () => {
     expect(
       deps.installSpmCodegenTemplate.mock.invocationCallOrder[0],
     ).toBeLessThan(deps.generateAutolinking.mock.invocationCallOrder[0]);
+  });
+
+  // -------------------------------------------------------------------------
+  // F2: a FRESH app (no pin yet) derives its first flavor from $CONFIGURATION
+  // instead of hardcoding debug, via flavorFromConfiguration. An existing pin
+  // still wins over $CONFIGURATION (sync must not stomp a Release pin).
+  // -------------------------------------------------------------------------
+  describe('flavor resolution (F2: fresh state derives from $CONFIGURATION)', () => {
+    const ORIGINAL_CONFIGURATION = process.env.CONFIGURATION;
+    afterEach(() => {
+      if (ORIGINAL_CONFIGURATION === undefined) {
+        delete process.env.CONFIGURATION;
+      } else {
+        process.env.CONFIGURATION = ORIGINAL_CONFIGURATION;
+      }
+    });
+
+    it('no pin + CONFIGURATION=Release -> release', async () => {
+      process.env.CONFIGURATION = 'Release';
+      const deps = makeDeps();
+      await run(deps);
+      expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'release');
+      expect(deps.generateAutolinking).toHaveBeenCalledWith(
+        expect.arrayContaining(['--flavor', 'release']),
+      );
+    });
+
+    it('no pin + CONFIGURATION=Debug -> debug', async () => {
+      process.env.CONFIGURATION = 'Debug';
+      const deps = makeDeps();
+      await run(deps);
+      expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'debug');
+    });
+
+    it('no pin + CONFIGURATION=Staging -> release (name-match rule)', async () => {
+      process.env.CONFIGURATION = 'Staging';
+      const deps = makeDeps();
+      await run(deps);
+      expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'release');
+    });
+
+    it('no pin + CONFIGURATION containing "development" -> debug', async () => {
+      process.env.CONFIGURATION = 'MyDevelopmentBuild';
+      const deps = makeDeps();
+      await run(deps);
+      expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'debug');
+    });
+
+    it('an existing pin WINS over $CONFIGURATION', async () => {
+      process.env.CONFIGURATION = 'Debug';
+      const dir = path.join(appRoot, 'build', 'xcframeworks');
+      fs.mkdirSync(dir, {recursive: true});
+      fs.symlinkSync(
+        path.join(appRoot, 'cache', '1.0', 'release', 'React.xcframework'),
+        path.join(dir, 'React.xcframework'),
+      );
+      const deps = makeDeps();
+      await run(deps);
+      expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'release');
+    });
+
+    it('no pin + no $CONFIGURATION -> debug', async () => {
+      delete process.env.CONFIGURATION;
+      const deps = makeDeps();
+      await run(deps);
+      expect(deps.defaultCacheDir).toHaveBeenCalledWith('0.85.0', 'debug');
+    });
   });
 });

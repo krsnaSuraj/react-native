@@ -10,6 +10,7 @@
 
 'use strict';
 
+const {flavorFromConfiguration} = require('./spm-utils');
 const {execFileSync} = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -98,10 +99,10 @@ function matchSlice(
  *      LINK step consumes) with the desired-flavor slices. Gated on
  *      BUILT_PRODUCTS_DIR existing; skipped in the pre-action / clean build.
  *
- * The desired flavor is derived purely from $CONFIGURATION (Release → release,
- * everything else → debug); the currently-pinned flavor is read from the slot
- * symlink's parent-dir segment (`.../<version>/<flavor>/<F>.xcframework`). There
- * is no persisted marker (unlike the CocoaPods React-Core-prebuilt swap's
+ * The desired flavor is derived from $CONFIGURATION via flavorFromConfiguration
+ * (name-match on "debug"/"development", else release; RN_SPM_FLAVOR overrides);
+ * the currently-pinned flavor is read from the slot symlink's parent-dir segment
+ * (`.../<version>/<flavor>/<F>.xcframework`). There is no persisted marker (unlike the CocoaPods React-Core-prebuilt swap's
  * `.last_build_configuration`): this runs on every build and the symlink target
  * is itself the source of truth for the pinned flavor.
  *
@@ -145,7 +146,7 @@ function swapFlavorFrameworks(
   // needs only appRoot + configuration, so it runs BEFORE the products-dir gate:
   // the scheme pre-action (which fires before Xcode builds the graph and locks
   // in the embed source) has no BUILT_PRODUCTS_DIR yet but MUST still repoint.
-  const flavor = configuration === 'Release' ? 'release' : 'debug';
+  const flavor = flavorFromConfiguration(configuration) ?? 'debug';
   const reactLink = path.join(
     appRoot,
     'build',

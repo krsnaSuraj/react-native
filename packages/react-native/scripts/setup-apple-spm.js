@@ -46,7 +46,8 @@
  * Options:
  *   --version <ver>             React Native version (default: the resolved
  *                               node_modules/react-native version).
- *   --flavor <debug|release>    Artifact flavor (default: debug).
+ *   --flavor <debug|release>    Artifact flavor (default: the app's current
+ *                               pin, else debug for a fresh app).
  *   --yes                       Skip the dirty-pbxproj confirmation prompt.
  *   [add] --xcodeproj <path>    Which .xcodeproj to inject into (when several).
  *   [add] --product-name <name> Which app target to inject into (when several).
@@ -104,6 +105,7 @@ const {
   findProjectRoot,
   installSpmCodegenTemplate,
   makeLogger,
+  readFlavorPin,
   readPackageJson,
   remotePackageConfig,
   runCodegenAndInstallTemplate,
@@ -153,8 +155,10 @@ function parseArgs(argv /*: Array<string> */) /*: SetupArgs */ {
     })
     .option('flavor', {
       type: 'string',
-      default: 'debug',
-      describe: 'Artifact flavor (debug or release)',
+      describe:
+        "Artifact flavor (debug or release). Defaults to the app's current " +
+        'pin (from build/xcframeworks/React.xcframework), or debug for a ' +
+        'fresh app with no pin yet.',
     })
     .option('yes', {
       type: 'boolean',
@@ -220,7 +224,10 @@ function parseArgs(argv /*: Array<string> */) /*: SetupArgs */ {
     action: requestedAction,
     version: parsed.version ?? null,
     artifacts: parsed.artifacts ?? null,
-    flavor: parsed.flavor,
+    explicitFlavor: parsed.flavor ?? null,
+    // Placeholder — main() resolves the real value via resolveFlavor() before
+    // anything reads it (see the explicitFlavor comment in spm-types.js).
+    flavor: parsed.flavor ?? 'debug',
     skipCodegen: parsed['skip-codegen'],
     downloadPolicy: parsed.download,
     productName: parsed['product-name'] ?? null,
@@ -308,6 +315,31 @@ function resolveAction(
   // `--deintegrate` (fresh CocoaPods project) is decided by the safe-gate in
   // main(), which only applies on this implicit path.
   return findInjectedXcodeproj(appRoot) != null ? 'update' : 'add';
+}
+
+/**
+ * Resolves the single artifact flavor every downstream consumer (ensureArtifacts,
+ * generateXcframeworksPackage, the other-flavor prefetch, scaffold's cache-slot
+ * label, generateAutolinking) sees this run. An EXPLICIT `--flavor` always wins,
+ * and must be exactly 'debug' or 'release' — anything else is a hard error, since
+ * a bogus value would go on to build cache paths and download the wrong (or no)
+ * artifacts. Without an explicit flavor, PRESERVE whatever `appRoot` is already
+ * pinned to (so `spm update` can't silently re-pin a Release app back to debug);
+ * a fresh app with no pin yet falls back to 'debug'.
+ */
+function resolveFlavor(
+  explicitFlavor /*: string | null */,
+  appRoot /*: string */,
+) /*: 'debug' | 'release' */ {
+  if (explicitFlavor != null) {
+    if (explicitFlavor !== 'debug' && explicitFlavor !== 'release') {
+      throw new Error(
+        `Invalid --flavor "${explicitFlavor}" — expected "debug" or "release".`,
+      );
+    }
+    return explicitFlavor;
+  }
+  return readFlavorPin(appRoot) ?? 'debug';
 }
 
 /**
@@ -966,6 +998,17 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     appRoot = redirectTo;
   }
 
+  // Resolve --flavor ONCE, here, before any downstream consumer reads it (see
+  // resolveFlavor's doc comment). Must run after the redirect above (the pin
+  // lives under the final appRoot).
+  try {
+    args.flavor = resolveFlavor(args.explicitFlavor, appRoot);
+  } catch (e) {
+    logError(e.message);
+    process.exitCode = 1;
+    return;
+  }
+
   const action = resolveAction(args.action, appRoot);
 
   // Zero-arg safe-gate: when `add` was resolved implicitly (no action typed)
@@ -1291,5 +1334,6 @@ module.exports = {
   detectStandardRnLayoutRedirect,
   findInjectedXcodeproj,
   resolveAction,
+  resolveFlavor,
   shouldAutoDeintegrate,
 };

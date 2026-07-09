@@ -249,11 +249,13 @@ describe('buildSyncAutolinkingScript', () => {
     );
   });
 
-  it('mirrors swap-flavor.js flavor mapping (Release->release, else debug)', () => {
-    expect(script).toContain('DESIRED_FLAVOR=debug');
-    expect(script).toContain('if [ "${CONFIGURATION:-}" = "Release" ]; then');
+  it('mirrors flavorFromConfiguration (name-match on debug/development + RN_SPM_FLAVOR override)', () => {
     expect(script).toContain('DESIRED_FLAVOR=release');
-    // Case-insensitive match of the pinned symlink's flavor path component.
+    expect(script).toContain('DESIRED_FLAVOR=debug');
+    expect(script).toContain('RN_SPM_FLAVOR');
+    expect(script).toContain('*debug*|*development*) DESIRED_FLAVOR=debug ;;');
+    // Case-insensitive match, shared with the pinned symlink's flavor path
+    // component matching below.
     expect(script).toContain("tr '[:upper:]' '[:lower:]'");
     expect(script).toContain('debug) PINNED_FLAVOR=debug ;;');
     expect(script).toContain('release) PINNED_FLAVOR=release ;;');

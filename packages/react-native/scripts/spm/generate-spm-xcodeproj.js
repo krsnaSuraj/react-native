@@ -595,14 +595,24 @@ ${syncStaleCheckAndDispatch()}
 run_swap_flavor
 if [ "$SWAP_OK" -eq 0 ]; then
   # The swap could not run. Determine — in pure shell, mirroring
-  # swap-flavor.js — whether the pinned add-time flavor will ACTUALLY mismatch
-  # this configuration. swap-flavor.js maps CONFIGURATION=Release to the
-  # 'release' flavor and everything else (Debug + custom config names) to
-  # 'debug'; the pinned flavor is the parent dir of the React.xcframework
-  # symlink target (.../<version>/<flavor>/React.xcframework).
-  DESIRED_FLAVOR=debug
-  if [ "\${CONFIGURATION:-}" = "Release" ]; then
-    DESIRED_FLAVOR=release
+  # flavorFromConfiguration() in spm-utils.js — whether the pinned add-time
+  # flavor will ACTUALLY mismatch this configuration. RN_SPM_FLAVOR (if set to
+  # debug/release) wins outright; otherwise a case-insensitive contains-match
+  # on "debug"/"development" in CONFIGURATION selects 'debug', everything else
+  # (incl. custom config names like "Staging") selects 'release' — the same
+  # rule Xcode itself uses to map custom configuration names onto SwiftPM's
+  # .debug/.release build settings. The pinned flavor is the parent dir of the
+  # React.xcframework symlink target (.../<version>/<flavor>/React.xcframework).
+  DESIRED_FLAVOR=release
+  if [ -n "\${RN_SPM_FLAVOR:-}" ] && { [ "\$RN_SPM_FLAVOR" = "debug" ] || [ "\$RN_SPM_FLAVOR" = "release" ]; }; then
+    DESIRED_FLAVOR="\$RN_SPM_FLAVOR"
+  else
+    if [ -n "\${RN_SPM_FLAVOR:-}" ]; then
+      echo "warning: ignoring invalid RN_SPM_FLAVOR='\$RN_SPM_FLAVOR' (expected 'debug' or 'release')"
+    fi
+    case "$(printf '%s' "\${CONFIGURATION:-}" | tr '[:upper:]' '[:lower:]')" in
+      *debug*|*development*) DESIRED_FLAVOR=debug ;;
+    esac
   fi
   PINNED_FLAVOR=""
   LINK_TARGET="$(readlink "$SRCROOT/build/xcframeworks/React.xcframework" 2>/dev/null || true)"

@@ -183,6 +183,32 @@ describe('swapFlavorFrameworks', () => {
     expect(embedded()).toBe('REACT-debug');
   });
 
+  // F2: swap-flavor.js now maps CONFIGURATION via the shared
+  // flavorFromConfiguration name-match rule instead of an exact 'Release'
+  // string match — a custom configuration name (e.g. a "Staging" scheme
+  // config) resolves like Xcode's own SwiftPM configuration mapping does.
+  it('maps a custom configuration name ("Staging") to release', () => {
+    const result = swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Staging',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+    expect(result.flavor).toBe('release');
+    expect(embedded()).toBe('REACT-release');
+  });
+
+  it('maps a custom configuration name containing "development" to debug', () => {
+    const result = swapFlavorFrameworks({
+      appRoot,
+      configuration: 'MyDevelopmentConfig',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+    expect(result.flavor).toBe('debug');
+    expect(embedded()).toBe('REACT-debug');
+  });
+
   it('swaps a framework at the BUILT_PRODUCTS_DIR top level (real SPM binaryTarget layout)', () => {
     // SPM copies binaryTarget frameworks to <BUILT_PRODUCTS_DIR>/<F>.framework,
     // not PackageFrameworks/. Put it there and confirm the swap finds it.

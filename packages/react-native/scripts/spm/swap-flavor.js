@@ -125,30 +125,20 @@ function swapFlavorFrameworks(
     builtProductsDir: ?string,
     platformName: ?string,
     isMacCatalyst?: boolean,
-    // The embedded copy inside the built .app bundle
-    // (<targetBuildDir>/<frameworksFolderPath>/<F>.framework) — the ONLY copy
-    // the running app loads. Xcode's implicit SPM Embed runs before our appended
-    // in-target phase, so correcting this post-embed copy is the deterministic
-    // same-build fix (the symlink repoint is best-effort defense-in-depth that
-    // races graph construction). codeSigningAllowed / expandedCodeSignIdentity
-    // drive the re-sign, mirroring CocoaPods' `[CP] Embed Pods Frameworks`.
-    targetBuildDir?: ?string,
-    frameworksFolderPath?: ?string,
-    codeSigningAllowed?: ?string,
-    expandedCodeSignIdentity?: ?string,
     logger?: {log: (msg: string) => void},
   } */,
-) /*: void */ {
+) /*: {
+  builtinsCorrected: boolean,
+  hasProducts: boolean,
+  flavor: string,
+  previousFlavor: string,
+} */ {
   const {
     appRoot,
     configuration,
     builtProductsDir,
     platformName,
     isMacCatalyst = false,
-    targetBuildDir,
-    frameworksFolderPath,
-    codeSigningAllowed,
-    expandedCodeSignIdentity,
     logger = {log() {}},
   } = opts;
   // Discover the desired flavor + cache slot from the app-local symlinks. This
@@ -175,10 +165,19 @@ function swapFlavorFrameworks(
       fs.readlinkSync(reactLink),
     );
   } catch {
-    return; // Not an SPM-set-up app (no symlink).
+    // Not an SPM-set-up app (no symlink) — nothing to swap.
+    return {
+      builtinsCorrected: false,
+      hasProducts: false,
+      flavor,
+      previousFlavor: flavor,
+    };
   }
   const versionDir = path.dirname(path.dirname(linkTarget));
   const slot = path.join(versionDir, flavor);
+  // The flavor the app is pinned to RIGHT NOW (before any repoint) — reported so
+  // the CLI can name the "was pinned to '<old>'" in the HARD-FAIL message.
+  const previousFlavor = path.basename(path.dirname(linkTarget));
   // The rsync (LINK-step correction) only applies once SPM has materialized the
   // frameworks into BUILT_PRODUCTS_DIR. On a clean build / in the pre-action that
   // dir does not exist yet — the repoint still runs, the rsync is skipped.
@@ -187,13 +186,6 @@ function swapFlavorFrameworks(
   const pkgFrameworks =
     builtProductsDir != null
       ? path.join(builtProductsDir, 'PackageFrameworks')
-      : null;
-  // The frameworks folder INSIDE the built .app bundle. Present only in the
-  // in-target build phase (the appended "Fix SPM Embedded Flavor" phase, which
-  // runs AFTER Xcode's implicit SPM Embed), never in the scheme pre-action.
-  const embeddedFrameworksDir =
-    targetBuildDir != null && frameworksFolderPath != null
-      ? path.join(targetBuildDir, frameworksFolderPath)
       : null;
   if (process.env.RN_SPM_SWAP_DEBUG === '1') {
     logger.log(`swap-flavor[debug]: linkTarget=${linkTarget}`);
@@ -369,16 +361,32 @@ function swapFlavorFrameworks(
       }
     }
 
-    // (b) COPY the desired-flavor slice over every already-materialized copy:
-    //   - BUILT_PRODUCTS_DIR / PackageFrameworks — the Link-step copies.
-    //   - <targetBuildDir>/<frameworksFolderPath> — the EMBEDDED copy inside the
-    //     .app bundle, the one the running app actually loads. Correcting it
-    //     post-embed (in the appended phase) is the deterministic same-build fix;
-    //     a changed embedded framework is re-codesigned like CocoaPods does.
-    // Each copy is only touched when it already exists. rsync -a --delete is
-    // idempotent (no-op when already the right flavor).
-    if (desired != null && fs.existsSync(desired)) {
-      const sliceId = matchSlice(desired, platformName, isMacCatalyst);
+    // (b) COPY the desired-flavor slice over the LINK-step copies SPM
+    // materialized in BUILT_PRODUCTS_DIR + PackageFrameworks (the ones the Link
+    // step consumes). RN NEVER writes the embedded `.app/Frameworks` copy — that
+    // is Xcode's, and the repoint above fixes the source it embeds from. Each
+    // copy is only touched when it already exists; rsync -a --delete is
+    // idempotent. The `anyDest` short-circuit avoids reading the slice plist
+    // (matchSlice → plutil) when nothing is materialized to correct yet (e.g. the
+    // leading swap on a clean build) — a behavior-preserving no-op guard.
+    if (
+      desired != null &&
+      fs.existsSync(desired) &&
+      hasProducts &&
+      builtProductsDir != null &&
+      pkgFrameworks != null
+    ) {
+      const dests = [builtProductsDir, pkgFrameworks];
+      const anyDest = dests.some(dir => {
+        try {
+          return fs.readdirSync(dir).some(e => e.endsWith('.framework'));
+        } catch {
+          return false;
+        }
+      });
+      const sliceId = anyDest
+        ? matchSlice(desired, platformName, isMacCatalyst)
+        : null;
       if (sliceId != null) {
         const sliceDir = path.join(desired, sliceId);
         const fwName = fs
@@ -386,20 +394,8 @@ function swapFlavorFrameworks(
           .find(e => e.endsWith('.framework'));
         if (fwName != null) {
           const src = path.join(sliceDir, fwName);
-          const dests /*: Array<{dir: string, embedded: boolean}> */ = [];
-          if (
-            hasProducts &&
-            builtProductsDir != null &&
-            pkgFrameworks != null
-          ) {
-            dests.push({dir: builtProductsDir, embedded: false});
-            dests.push({dir: pkgFrameworks, embedded: false});
-          }
-          if (embeddedFrameworksDir != null) {
-            dests.push({dir: embeddedFrameworksDir, embedded: true});
-          }
           let copiedAny = false;
-          for (const {dir, embedded} of dests) {
+          for (const dir of dests) {
             const dest = path.join(dir, fwName);
             if (!fs.existsSync(dest)) {
               continue;
@@ -411,16 +407,6 @@ function swapFlavorFrameworks(
               dest + path.sep,
             ]);
             copiedAny = true;
-            if (embedded) {
-              // Re-sign unconditionally after any rsync to the embedded copy —
-              // re-signing an unchanged framework is harmless, and it avoids a
-              // fragile before/after content diff.
-              codesignFramework(dest, {
-                codeSigningAllowed,
-                expandedCodeSignIdentity,
-                logger,
-              });
-            }
           }
           // Count once per artifact that had at least one copy corrected (not
           // once per destination dir).
@@ -439,45 +425,17 @@ function swapFlavorFrameworks(
       ? `swap-flavor: ${flavor} — repointed ${repointed} slot symlink(s) (${pluginRepointed} plugin), swapped ${swapped} framework copy/copies (${pluginSwapped} plugin)`
       : `swap-flavor: ${flavor} — repointed ${repointed} slot symlink(s) (${pluginRepointed} plugin) (no products dir yet — pre-action)`,
   );
-}
 
-/**
- * Re-codesign an embedded framework after its binary was swapped, mirroring
- * CocoaPods' `[CP] Embed Pods Frameworks` phase. Skipped entirely when Xcode
- * disabled signing for this build (CODE_SIGNING_ALLOWED=NO). The identity
- * defaults to '-' (ad-hoc) — correct for the simulator, where
- * EXPANDED_CODE_SIGN_IDENTITY is unset. Best-effort: a codesign failure is
- * logged and swallowed (the caller contract is never-throw).
- */
-function codesignFramework(
-  frameworkPath /*: string */,
-  opts /*: {
-    codeSigningAllowed: ?string,
-    expandedCodeSignIdentity: ?string,
-    logger: {log: (msg: string) => void},
-  } */,
-) /*: void */ {
-  const {codeSigningAllowed, expandedCodeSignIdentity, logger} = opts;
-  if (codeSigningAllowed === 'NO') {
-    return;
-  }
-  const identity =
-    expandedCodeSignIdentity != null && expandedCodeSignIdentity.length > 0
-      ? expandedCodeSignIdentity
-      : '-';
-  try {
-    execFileSync('codesign', [
-      '--force',
-      '--preserve-metadata=identifier,entitlements,flags',
-      '--sign',
-      identity,
-      frameworkPath,
-    ]);
-  } catch (e) {
-    logger.log(
-      `swap-flavor: codesign failed for ${frameworkPath} (${e.message}) — continuing.`,
-    );
-  }
+  // Report whether a BUILTIN symlink was actually repointed this run (i.e. the
+  // build STARTED on the wrong flavor). The CLI turns this into a HARD-FAIL +
+  // CONVERGE when in an in-target context (hasProducts): fail this build (the
+  // embed already captured the stale source), rebuild green.
+  return {
+    builtinsCorrected: repointed - pluginRepointed > 0,
+    hasProducts,
+    flavor,
+    previousFlavor,
+  };
 }
 
 /**

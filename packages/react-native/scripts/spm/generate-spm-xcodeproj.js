@@ -289,8 +289,8 @@ function shellScriptPhase(
   };
 }
 
-// The node + react-native-dir resolution preamble shared by the sync phase and
-// the appended embedded-fix phase. Both dispatch DIRECTLY into react-native's
+// The node + react-native-dir resolution preamble shared by the in-target build
+// phase and the scheme pre-action. Both dispatch DIRECTLY into react-native's
 // scripts rather than through 'npx react-native' — that CLI requires
 // @react-native-community/cli (absent in e.g. Expo apps), so it would exit
 // non-zero and the failure would be silently swallowed, leaving the build with
@@ -334,68 +334,13 @@ if [ -z "$RN_DIR" ] || [ ! -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
 fi`;
 }
 
-// The APPENDED "Fix SPM Embedded Flavor" build phase. Runs LAST in the target's
-// buildPhases — crucially AFTER Xcode's implicit SPM Embed (builtin-copy) — so
-// it deterministically corrects, within the SAME build, the flavor of the
-// frameworks EMBEDDED in the .app bundle (the ones the app actually loads). The
-// scheme pre-action's symlink repoint is best-effort defense-in-depth that races
-// graph construction; THIS phase is the guarantee. A single swap-flavor dispatch
-// — swap-flavor.js reads TARGET_BUILD_DIR / FRAMEWORKS_FOLDER_PATH from the env
-// and rsyncs + re-codesigns the embedded copies. Soft-fails (the sync phase's
-// trailing swap already hard-fails a certain flavor mismatch).
-function buildEmbeddedFixScript(reactNativePath /*: string */) /*: string */ {
-  return `${nodeAndRnDirPreamble(reactNativePath)}
-
-# Correct the flavor of the frameworks Xcode already EMBEDDED into the .app
-# bundle (this phase is appended, so it runs after the implicit SPM Embed).
-if [ -n "\${BUILT_PRODUCTS_DIR:-}" ] && [ -n "$NODE_BINARY" ] && [ -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
-  ( cd "$SRCROOT" && "$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" swap-flavor ) || echo "warning: SPM embedded-flavor fix could not run; the .app may embed the add-time flavor"
-fi
-`;
-}
-
-function buildSyncAutolinkingScript(
-  reactNativePath /*: string */,
-) /*: string */ {
-  return `${nodeAndRnDirPreamble(reactNativePath)}
-
-# ---------------------------------------------------------------------------
-# Flavor swap — defined ONCE, called TWICE (a "swap sandwich"). SwiftPM can't
-# branch a binaryTarget on $CONFIGURATION, so — mirroring the CocoaPods
-# React-Core-prebuilt swap (replace-rncore-version.js) — swap-flavor.js (1)
-# REPOINTS the app-local + autolinking-plugin slot symlinks, the source Xcode's
-# implicit Embed step resolves and captures at build-graph-construction time,
-# and (2) overwrites the SPM-copied frameworks in $BUILT_PRODUCTS_DIR with the
-# correct-flavor slices for the Link step. Sets SWAP_OK / SWAP_REASON; the
-# loud-error mismatch fallback is applied only after the FINAL (trailing) call.
-run_swap_flavor() {
-  SWAP_OK=0
-  SWAP_REASON=""
-  if [ -z "\${BUILT_PRODUCTS_DIR:-}" ]; then
-    # Not inside an Xcode build environment — nothing to swap against.
-    SWAP_OK=1
-    return 0
-  fi
-  if [ -z "$NODE_BINARY" ]; then
-    SWAP_REASON="no node binary found (set NODE_BINARY or add ios/.xcode.env)"
-  elif [ ! -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
-    SWAP_REASON="could not locate the react-native package (setup-apple-spm.js)"
-  elif ( cd "$SRCROOT" && "$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" swap-flavor ); then
-    SWAP_OK=1
-  else
-    SWAP_REASON="swap-flavor exited non-zero"
-  fi
-}
-
-# Leading swap — the RACE-WINNING repoint (graph-time embed correctness). Scheme
-# pre-actions do NOT reliably block Xcode's graph construction: a sub-second
-# pre-action repoints the embed source in time, but a full re-sync (~15s) loses
-# the race. So repoint FIRST — cheap, before the stale check / sync below — to
-# fix the embed source up front. Its result is intentionally not acted on here;
-# the trailing swap owns the authoritative end-state + the loud-error fallback.
-run_swap_flavor
-
-STAMP="$SRCROOT/build/generated/autolinking/.spm-sync-stamp"
+// Shared: the STALE-input check + conditional codegen/autolinking sync dispatch.
+// Used by BOTH the scheme pre-action (sync-only auto-heal) and the in-target
+// build phase (where it runs BETWEEN the leading + trailing flavor swaps). Kept
+// in one place so a dependency change re-syncs identically regardless of which
+// entry point fires.
+function syncStaleCheckAndDispatch() /*: string */ {
+  return `STAMP="$SRCROOT/build/generated/autolinking/.spm-sync-stamp"
 STALE=0
 
 # Check 0: xcframework artifacts missing (fresh clone)
@@ -511,13 +456,12 @@ if [ ! -f "$STAMP" ]; then
   STALE=1
 fi
 
-# Re-sync (codegen + autolinking), BETWEEN the two swaps. The sync dispatch
-# re-pins the app-local slot symlinks to the add-time (debug) flavor via
-# generate-spm-package linkOne on every re-sync, so the trailing swap below must
-# run AFTER it — it has to be the LAST writer of those symlinks. When inputs are
-# unchanged we skip the re-sync but STILL fall through to the trailing swap: a
-# Debug<->Release config flip changes no sync input yet must reflip the embedded
-# flavor.
+# Re-sync (codegen + autolinking) when a dependency input changed. In the
+# in-target build phase this runs BETWEEN the leading and trailing flavor swaps;
+# in the scheme pre-action it runs alone (auto-heal). The sync re-pins the
+# app-local slot symlinks to the add-time flavor via generate-spm-package
+# linkOne, which is why the in-target phase's trailing swap must run AFTER it (it
+# has to be the LAST writer of those symlinks).
 if [ "$STALE" -eq 1 ]; then
   echo "SPM sync inputs changed — re-syncing (codegen + autolinking)..."
 
@@ -557,12 +501,97 @@ if [ "$STALE" -eq 1 ]; then
     echo "warning: SPM sync failed — build may use stale codegen/autolinking"
   fi
 fi
+`;
+}
+
+// Scheme PRE-ACTION script: sync-only (auto-heal). Re-runs codegen + autolinking
+// BEFORE Xcode resolves the SwiftPM graph so a dependency change lands in ONE
+// build. It deliberately does NOT swap flavors — that belongs to the in-target
+// build phase, where a mismatched START is detected deterministically. A
+// pre-action swap could win its race and MASK the mismatch while the graph still
+// captured stale state (a false green), so it is intentionally absent here.
+function buildSchemePreActionScript(
+  reactNativePath /*: string */,
+) /*: string */ {
+  return `${nodeAndRnDirPreamble(reactNativePath)}
+
+${syncStaleCheckAndDispatch()}
+`;
+}
+
+// In-target build phase script: the swap SANDWICH + HARD-FAIL/CONVERGE.
+//
+// SwiftPM can't branch a binaryTarget on $CONFIGURATION, so — mirroring the
+// CocoaPods React-Core-prebuilt swap — swap-flavor.js (1) REPOINTS the app-local
+// + autolinking-plugin slot symlinks (the source Xcode's Embed step resolves at
+// build-graph-construction time) and (2) overwrites the SPM-copied frameworks in
+// $BUILT_PRODUCTS_DIR for the Link step.
+//
+// The in-target embed can NOT be corrected for the CURRENT build (embed runs
+// unordered vs script phases; a second .app writer races Xcode's CodeSign). So
+// when a build STARTS on the wrong flavor we HARD-FAIL + CONVERGE: the leading
+// swap corrects the pin (CLI exit 1), we capture that (MISMATCH_PENDING) without
+// aborting, the sync + trailing swap complete so state is fully correct, then we
+// fail the build ONCE at the END — the rebuild is green and nothing stale ships.
+function buildSyncAutolinkingScript(
+  reactNativePath /*: string */,
+) /*: string */ {
+  return `${nodeAndRnDirPreamble(reactNativePath)}
+
+# Flavor swap — defined ONCE, called TWICE (a "swap sandwich"). Sets SWAP_OK /
+# SWAP_REASON, and SWAP_CORRECTED=1 when the CLI exit code (1) signals it
+# repointed a builtin mismatch this run (a deliberate, distinct signal — genuine
+# swap crashes are swallowed by the CLI and exit 0). The loud can't-run-node
+# fallback is applied only after the FINAL (trailing) call.
+run_swap_flavor() {
+  SWAP_OK=0
+  SWAP_REASON=""
+  SWAP_CORRECTED=0
+  if [ -z "\${BUILT_PRODUCTS_DIR:-}" ]; then
+    # Not inside an Xcode build environment — nothing to swap against.
+    SWAP_OK=1
+    return 0
+  fi
+  if [ -z "$NODE_BINARY" ]; then
+    SWAP_REASON="no node binary found (set NODE_BINARY or add ios/.xcode.env)"
+    return 0
+  fi
+  if [ ! -f "$RN_DIR/scripts/setup-apple-spm.js" ]; then
+    SWAP_REASON="could not locate the react-native package (setup-apple-spm.js)"
+    return 0
+  fi
+  RC=0
+  ( cd "$SRCROOT" && "$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" swap-flavor ) || RC=$?
+  if [ "$RC" -eq 0 ]; then
+    SWAP_OK=1
+  elif [ "$RC" -eq 1 ]; then
+    # The swap ran and CORRECTED a mismatched start (the app was pinned to the
+    # wrong flavor for this configuration). State is now correct; the build must
+    # still fail so the embed is redone on the (green) rebuild.
+    SWAP_OK=1
+    SWAP_CORRECTED=1
+  else
+    SWAP_REASON="swap-flavor exited non-zero ($RC)"
+  fi
+}
+
+MISMATCH_PENDING=0
+
+# Leading swap — repoints the embed source up front, BEFORE the stale check /
+# sync below. If it corrected a mismatch, remember it; do NOT abort here (sync +
+# the trailing swap must still run so state is fully converged before we fail).
+run_swap_flavor
+if [ "$SWAP_CORRECTED" -eq 1 ]; then MISMATCH_PENDING=1; fi
+
+${syncStaleCheckAndDispatch()}
 
 # Trailing swap — the AUTHORITATIVE end-state. Runs LAST because the sync above
-# re-pins the slot symlinks to the add-time (debug) flavor via linkOne; this
-# call restores the requested flavor AND — once BUILT_PRODUCTS_DIR is
-# materialized in the in-target phase — rsyncs the link-step framework copies.
-# The loud-error mismatch fallback is tied to THIS (final) swap.
+# re-pins the slot symlinks to the add-time flavor via linkOne; this call
+# restores the requested flavor AND rsyncs the link-step framework copies. It is
+# NOT captured into MISMATCH_PENDING: the hard-fail means "the build STARTED
+# mismatched", which only the LEADING swap can observe. A trailing repoint just
+# undoes the sync's default re-pin (end-state correction, not a stale start), so
+# flagging it would be a false red.
 run_swap_flavor
 if [ "$SWAP_OK" -eq 0 ]; then
   # The swap could not run. Determine — in pure shell, mirroring
@@ -593,6 +622,15 @@ if [ "$SWAP_OK" -eq 0 ]; then
   else
     echo "warning: SwiftPM flavor swap could not run ($SWAP_REASON); build may link the add-time flavor"
   fi
+fi
+
+# HARD-FAIL + CONVERGE. A build that STARTED on the wrong flavor is failed ONCE,
+# here at the END — after the swaps + sync have fully corrected the pin — so the
+# rebuild is green and nothing stale ever ships. Fires only when the swap ran and
+# actually corrected a mismatch (the CLI already printed the actionable error:).
+if [ "$MISMATCH_PENDING" -eq 1 ]; then
+  echo "error: React Native SwiftPM frameworks were on the wrong flavor for this \${CONFIGURATION:-} build and have been switched — build again (one-time after a configuration change)."
+  exit 1
 fi
 `;
 }
@@ -1112,47 +1150,22 @@ function injectSpmIntoPbxproj(
     {prepend: true},
   );
 
-  // 7. The "Fix SPM Embedded Flavor" build phase — APPENDED (no prepend) so it
-  //    lands LAST in buildPhases and runs AFTER Xcode's implicit SPM Embed,
-  //    deterministically correcting the embedded framework flavor in the same
-  //    build (the CocoaPods `[CP] Embed Pods Frameworks` pattern). In-target
-  //    only — the scheme pre-action does NOT get this script.
-  const embeddedFixScript = buildEmbeddedFixScript(reactNativePath);
-  const embeddedFixPhaseUuid = mkUuid(
+  // 7. MIGRATION: earlier versions APPENDED a "Fix SPM Embedded Flavor" phase to
+  //    correct the embedded framework flavor AFTER Xcode's implicit SPM Embed.
+  //    That is impossible to do reliably (embed runs unordered vs script phases;
+  //    a second .app writer races Xcode's CodeSign), so RN no longer writes the
+  //    .app at all — the flavor mismatch is handled by HARD-FAIL + CONVERGE
+  //    instead. We no longer inject the phase, and we actively REMOVE any that a
+  //    prior `add`/`update` left (object + buildPhases membership). Its UUID is
+  //    deliberately NOT recorded in injectedUuids, so the marker drops it too;
+  //    existing apps heal on their next `spm update`. Both removals are no-ops on
+  //    a project that never had it (a fresh injection stays byte-identical).
+  const legacyEmbeddedFixPhaseUuid = mkUuid(
     'PBXShellScriptBuildPhase',
     'FixEmbeddedFlavor',
   );
-  if (!text.includes(embeddedFixPhaseUuid)) {
-    text = insertObjectsIntoSection(
-      text,
-      'PBXShellScriptBuildPhase',
-      serializeEntry(
-        shellScriptPhase(
-          embeddedFixPhaseUuid,
-          'Fix SPM Embedded Flavor',
-          embeddedFixScript,
-        ),
-      ),
-    );
-  } else {
-    // Refresh the shellScript in place on re-inject, same as the sync phase.
-    const existingPhase = findObjectByUuid(text, embeddedFixPhaseUuid);
-    if (existingPhase != null) {
-      text = setScalarField(
-        text,
-        existingPhase,
-        'shellScript',
-        quoteIfNeeded(embeddedFixScript),
-      );
-    }
-  }
-  injectedUuids.push(embeddedFixPhaseUuid);
-  text = addArrayMembers(
-    text,
-    findApplicationTargetByUuid(text, plan.targetUuid),
-    'buildPhases',
-    [{uuid: embeddedFixPhaseUuid, comment: 'Fix SPM Embedded Flavor'}],
-  );
+  text = removeArrayMembersByUuid(text, [legacyEmbeddedFixPhaseUuid]);
+  text = removeObjectByUuid(text, legacyEmbeddedFixPhaseUuid);
 
   // 8. Plugin generated sources compiled INTO THE APP TARGET (e.g. Expo's
   //    ExpoModulesProvider.swift). An `@objc` class only reaches the ObjC
@@ -1845,7 +1858,9 @@ function injectSpmIntoExistingXcodeproj(
     appName: plan.target.name,
     targetUuid: plan.target.uuid,
     projName,
-    syncScript: buildSyncAutolinkingScript(reactNativePath),
+    // The scheme pre-action is SYNC-ONLY (no flavor swap). A pre-action swap
+    // could win its race and mask a mismatch from the in-target detector.
+    syncScript: buildSchemePreActionScript(reactNativePath),
   });
   log(`Scheme sync pre-action: ${schemeResult.status}`);
 
@@ -2033,7 +2048,7 @@ function removeSpmInjection(
 module.exports = {
   generateXcscheme,
   buildSyncAutolinkingScript,
-  buildEmbeddedFixScript,
+  buildSchemePreActionScript,
   ensureStubPackages,
   buildSpmDependencyGraph,
   spmGraphToEntries,

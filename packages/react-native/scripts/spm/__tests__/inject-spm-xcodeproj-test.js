@@ -194,18 +194,53 @@ describe('injectSpmIntoPbxproj — Tier 2 (build settings + phase)', () => {
     expect(syncIdx).toBeLessThan(sourcesIdx);
   });
 
-  it('APPENDS the Fix SPM Embedded Flavor phase (last in buildPhases)', () => {
+  it('does NOT append a Fix SPM Embedded Flavor phase (RN never writes the .app)', () => {
     const {text} = inject(PLAIN);
-    expect(text).toContain('Fix SPM Embedded Flavor');
-    // Its buildPhases-array member is the LAST entry (appended, not prepended).
+    expect(text).not.toContain('Fix SPM Embedded Flavor');
     const bp = text.slice(text.indexOf('buildPhases = ('));
     const arr = bp.slice(0, bp.indexOf(');'));
     const comments = [...arr.matchAll(/\/\* ([^*]+) \*\//g)].map(m => m[1]);
     expect(comments[0]).toBe('Sync SPM Autolinking'); // prepended, first
-    expect(comments[comments.length - 1]).toBe('Fix SPM Embedded Flavor');
-    // Runs after Sources (post-embed).
-    const fixIdx = text.indexOf('Fix SPM Embedded Flavor */,');
-    expect(fixIdx).toBeGreaterThan(text.indexOf('Sources */,'));
+    expect(comments).not.toContain('Fix SPM Embedded Flavor');
+  });
+
+  it('MIGRATES away an existing Fix SPM Embedded Flavor phase on re-injection (object + membership)', () => {
+    const {namespacedUUID} = require('../spm-pbxproj');
+    const {text: first} = inject(PLAIN);
+    const plan = planInjection(PLAIN, {});
+    const legacyUuid = namespacedUUID(
+      plan.rootUuid,
+      'PBXShellScriptBuildPhase',
+      'FixEmbeddedFlavor',
+    );
+    // Splice a legacy phase object + its buildPhases membership back in, as an
+    // app injected by an older RN would have.
+    const withObject = first.replace(
+      '/* End PBXShellScriptBuildPhase section */',
+      `\t\t${legacyUuid} /* Fix SPM Embedded Flavor */ = {\n\t\t\tisa = PBXShellScriptBuildPhase;\n\t\t\tname = "Fix SPM Embedded Flavor";\n\t\t\tshellScript = "echo legacy";\n\t\t};\n/* End PBXShellScriptBuildPhase section */`,
+    );
+    const withLegacy = withObject.replace(
+      /(buildPhases = \([\s\S]*?)(\n\t\t\t\);)/,
+      `$1\n\t\t\t\t${legacyUuid} /* Fix SPM Embedded Flavor */,$2`,
+    );
+    expect(withLegacy).toContain('Fix SPM Embedded Flavor');
+
+    const plan2 = planInjection(withLegacy, {});
+    const {text: healed} = injectSpmIntoPbxproj(
+      withLegacy,
+      {
+        rootUuid: plan2.rootUuid,
+        targetUuid: plan2.target.uuid,
+        configUuids: plan2.configUuids,
+        frameworksPhaseUuid: plan2.frameworksPhaseUuid,
+        sourcesPhaseUuid: plan2.sourcesPhaseUuid,
+      },
+      RN_PATH,
+      null,
+    );
+    expect(healed).not.toContain('Fix SPM Embedded Flavor');
+    expect(healed).not.toContain(legacyUuid);
+    expect(isBalanced(healed)).toBe(true);
   });
 });
 
@@ -382,31 +417,6 @@ describe('injectSpmIntoPbxproj — invariants', () => {
     // The stale marker is gone and the current script is restored.
     expect(second).not.toContain('STALE_OLD_SYNC_COMMAND');
     expect(second).toContain('npx react-native spm sync');
-    expect(second).toBe(first);
-  });
-
-  it('refreshes a stale Fix SPM Embedded Flavor shellScript on re-injection', () => {
-    const first = inject(PLAIN).text;
-    // Corrupt a substring unique to the embedded-fix phase script.
-    const stale = first.replace(
-      'SPM embedded-flavor fix could not run',
-      'STALE_EMBEDDED_MARKER',
-    );
-    expect(stale).not.toBe(first);
-    const plan = planInjection(stale, {});
-    const second = injectSpmIntoPbxproj(
-      stale,
-      {
-        rootUuid: plan.rootUuid,
-        targetUuid: plan.target.uuid,
-        configUuids: plan.configUuids,
-        frameworksPhaseUuid: plan.frameworksPhaseUuid,
-      },
-      RN_PATH,
-      null,
-    ).text;
-    expect(second).not.toContain('STALE_EMBEDDED_MARKER');
-    expect(second).toContain('SPM embedded-flavor fix could not run');
     expect(second).toBe(first);
   });
 

@@ -996,27 +996,37 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // Build-time flavor swap (invoked by the generated build phase). Kept early
   // and dependency-free — no version resolution, no network — because it runs
   // on EVERY Xcode build. Reads the Xcode build env for the target flavor +
-  // products dir.
+  // products dir. It ONLY repoints the app-local slot symlinks + corrects the
+  // link-step product copies — it NEVER writes the embedded `.app/Frameworks`
+  // copy (Xcode is that bundle's single writer).
   if (action === 'swap-flavor') {
     const {swapFlavorFrameworks} = require('./spm/swap-flavor');
     try {
-      swapFlavorFrameworks({
+      const result = swapFlavorFrameworks({
         appRoot,
         configuration: process.env.CONFIGURATION,
         builtProductsDir: process.env.BUILT_PRODUCTS_DIR,
         platformName: process.env.PLATFORM_NAME,
         isMacCatalyst: process.env.IS_MACCATALYST === 'YES',
-        // Embedded-copy correction (the appended "Fix SPM Embedded Flavor"
-        // phase runs after Xcode's implicit SPM Embed). Absent in the scheme
-        // pre-action, so the embedded fix is a no-op there.
-        targetBuildDir: process.env.TARGET_BUILD_DIR,
-        frameworksFolderPath: process.env.FRAMEWORKS_FOLDER_PATH,
-        codeSigningAllowed: process.env.CODE_SIGNING_ALLOWED,
-        expandedCodeSignIdentity: process.env.EXPANDED_CODE_SIGN_IDENTITY,
         logger: {log},
       });
+      // HARD-FAIL + CONVERGE. When an IN-TARGET build (BUILT_PRODUCTS_DIR set,
+      // i.e. hasProducts) STARTED on the wrong flavor and we just repointed it,
+      // this build must still fail: Xcode captured the stale embed source at
+      // graph-construction time, before this phase ran, and that cannot be fixed
+      // in-place (a second .app writer races Xcode's CodeSign). The pin is now
+      // correct, so the REBUILD is green. The generated build phase propagates
+      // this exit 1 to fail the build (at the END, after the trailing swap). No
+      // hard-fail in the pre-action (hasProducts false) — it stays auto-heal.
+      if (result.hasProducts && result.builtinsCorrected) {
+        const cfg = process.env.CONFIGURATION ?? '(unknown)';
+        logError(
+          `error: React Native SwiftPM frameworks were pinned to '${result.previousFlavor}' but this is a ${cfg} build. They have been switched to ${result.flavor} — build again (one-time after a configuration change). Tip: 'npx react-native spm update --flavor ${result.flavor}' switches ahead of time.`,
+        );
+        process.exitCode = 1;
+      }
     } catch (e) {
-      // Non-fatal: a flavor-swap failure must not break the build.
+      // Non-fatal: a genuine flavor-swap failure must not break the build.
       logError(`swap-flavor failed: ${e.message}`);
     }
     return;

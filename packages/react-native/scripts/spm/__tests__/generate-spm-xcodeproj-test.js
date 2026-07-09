@@ -12,7 +12,7 @@
 
 const {
   addPreActionToScheme,
-  buildEmbeddedFixScript,
+  buildSchemePreActionScript,
   buildSyncAutolinkingScript,
   generateXcscheme,
 } = require('../generate-spm-xcodeproj');
@@ -303,12 +303,18 @@ describe('buildSyncAutolinkingScript', () => {
     expect(script).not.toContain('[[');
   });
 
-  it('is deterministic — the build phase and scheme pre-action get the same single script', () => {
-    // injectSpmPackages builds the phase with buildSyncAutolinkingScript(rnPath)
-    // and the scheme pre-action with the same call; a pure, deterministic result
-    // guarantees both embed byte-identical text.
+  it('is deterministic (pure) — repeated calls are byte-identical', () => {
     expect(buildSyncAutolinkingScript(BAKED)).toBe(
       buildSyncAutolinkingScript(BAKED),
+    );
+  });
+
+  it('the in-target phase and the scheme pre-action are now DIFFERENT scripts', () => {
+    // The phase carries the swap sandwich; the pre-action is sync-only. A
+    // pre-action swap could win its race and mask a mismatch from the in-target
+    // detector (a false green), so they intentionally diverge.
+    expect(buildSyncAutolinkingScript(BAKED)).not.toBe(
+      buildSchemePreActionScript(BAKED),
     );
   });
 });
@@ -412,38 +418,186 @@ describe('buildSyncAutolinkingScript watch-paths stale loop (behavioral)', () =>
 });
 
 // ---------------------------------------------------------------------------
-// buildEmbeddedFixScript — the appended in-target phase that runs AFTER Xcode's
-// implicit SPM Embed to deterministically correct the embedded framework flavor.
+// The obsolete appended "Fix SPM Embedded Flavor" phase is gone entirely — RN
+// never writes the .app bundle (Xcode is its single writer).
 // ---------------------------------------------------------------------------
-describe('buildEmbeddedFixScript', () => {
-  const BAKED = '../node_modules/react-native';
-  const script = buildEmbeddedFixScript(BAKED);
-
-  it('shares the node/RN_DIR resolution preamble with the sync script', () => {
-    expect(script).toContain('NODE_BINARY="${NODE_BINARY:-}"');
-    expect(script).toContain(
-      "require('path').dirname(require.resolve('react-native/package.json'))",
+describe('embedded-fix phase removal', () => {
+  it('no longer exports buildEmbeddedFixScript', () => {
+    expect(require('../generate-spm-xcodeproj').buildEmbeddedFixScript).toBe(
+      undefined,
     );
-    expect(script).toContain(`RN_DIR="${BAKED}"`);
   });
 
-  it('dispatches swap-flavor directly (no npx) and is a single dispatch (no sync, no sandwich)', () => {
-    expect(script).toContain(
-      '"$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" swap-flavor',
-    );
-    // Exactly one swap dispatch; NOT the sync-phase machinery.
-    expect(script.match(/setup-apple-spm\.js" swap-flavor/g)).toHaveLength(1);
-    expect(script).not.toContain('swap-flavor" sync');
+  it('no script references the embedded-fix phase', () => {
+    const BAKED = '../node_modules/react-native';
+    for (const s of [
+      buildSyncAutolinkingScript(BAKED),
+      buildSchemePreActionScript(BAKED),
+    ]) {
+      expect(s).not.toContain('Fix SPM Embedded Flavor');
+      expect(s).not.toContain('SPM embedded-flavor fix could not run');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HARD-FAIL + CONVERGE — the in-target phase runs the swap sandwich and fails
+// the build ONCE at the end after correcting a mismatched start; the scheme
+// PRE-ACTION is sync-only (no swap → cannot mask a mismatch = false green).
+// ---------------------------------------------------------------------------
+describe('buildSchemePreActionScript (sync-only)', () => {
+  const script = buildSchemePreActionScript('../node_modules/react-native');
+
+  it('does NOT dispatch or define a flavor swap', () => {
+    expect(script).not.toContain('swap-flavor');
     expect(script).not.toContain('run_swap_flavor');
-    expect(script).not.toContain('"$STALE"');
+    expect(script).not.toContain('MISMATCH');
   });
 
-  it('soft-fails (warns, no exit 1) so it never hard-breaks the build alone', () => {
-    expect(script).toContain('warning: SPM embedded-flavor fix could not run');
-    expect(script).not.toContain('exit 1');
+  it('still runs the sync dispatch (its auto-heal purpose)', () => {
+    expect(script).toContain(
+      '"$NODE_BINARY" "$RN_DIR/scripts/setup-apple-spm.js" sync',
+    );
+    expect(script).toContain('if [ "$STALE" -eq 1 ]; then');
   });
 
-  it('is POSIX-sh clean (no bashisms)', () => {
-    expect(script).not.toContain('[[');
+  it('parses under `sh -n`', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'preaction-'));
+    const file = path.join(dir, 'pre.sh');
+    fs.writeFileSync(file, script);
+    try {
+      expect(() => execFileSync('/bin/sh', ['-n', file])).not.toThrow();
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true});
+    }
+  });
+});
+
+describe('buildSyncAutolinkingScript — swap sandwich + hard-fail', () => {
+  const script = buildSyncAutolinkingScript('../node_modules/react-native');
+
+  it('runs the swap sandwich (def + leading + trailing = ≥3 run_swap_flavor uses)', () => {
+    expect(
+      (script.match(/run_swap_flavor/g) || []).length,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the LEADING swap runs BEFORE the sync dispatch (state corrected up front)', () => {
+    const leading = script.indexOf('run_swap_flavor\n');
+    const sync = script.indexOf('setup-apple-spm.js" sync');
+    expect(leading).toBeGreaterThan(-1);
+    expect(leading).toBeLessThan(sync);
+  });
+
+  it('captures the corrected-mismatch signal and defers the failure to the END', () => {
+    expect(script).toContain('MISMATCH_PENDING');
+    const gate = script.indexOf('if [ "$MISMATCH_PENDING" -eq 1 ]');
+    expect(gate).toBeGreaterThan(-1);
+    // The failure gate is AFTER the last swap (trailing) and after sync.
+    expect(gate).toBeGreaterThan(script.lastIndexOf('run_swap_flavor'));
+    expect(script.indexOf('setup-apple-spm.js" sync')).toBeLessThan(gate);
+    expect(script.indexOf('exit 1', gate)).toBeGreaterThan(gate);
+  });
+
+  it('parses under `sh -n`', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phase-'));
+    const file = path.join(dir, 'phase.sh');
+    fs.writeFileSync(file, script);
+    try {
+      expect(() => execFileSync('/bin/sh', ['-n', file])).not.toThrow();
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true});
+    }
+  });
+});
+
+// A real-shell behavioral check of HARD-FAIL + CONVERGE. The stub setup-apple-spm
+// is STATEFUL: swap-flavor reads a fake pin file, and only repoints + exits 1 on
+// a genuine pin-vs-CONFIGURATION mismatch; sync re-pins the fake pin to debug
+// (modelling generate-spm-package's default-debug links). This exercises the
+// leading-vs-trailing distinction the constant-exit-code stub could not.
+describe('sync script — shell behavior of HARD-FAIL + CONVERGE', () => {
+  let dir, rnDir, srcroot, pinFile;
+
+  function setup(startFlavor) {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-hardfail-'));
+    srcroot = path.join(dir, 'app');
+    fs.mkdirSync(srcroot, {recursive: true});
+    fs.writeFileSync(
+      path.join(srcroot, 'package.json'),
+      JSON.stringify({name: 'x'}),
+    );
+    pinFile = path.join(dir, 'pin');
+    fs.writeFileSync(pinFile, startFlavor); // the flavor the build STARTS on
+    rnDir = path.join(dir, 'rn');
+    fs.mkdirSync(path.join(rnDir, 'scripts'), {recursive: true});
+    fs.writeFileSync(
+      path.join(rnDir, 'scripts', 'setup-apple-spm.js'),
+      [
+        "const fs = require('fs');",
+        'const pinFile = process.env.FAKE_PIN_FILE;',
+        'const a = process.argv[2];',
+        // sync re-pins to the add-time (debug) flavor, like linkOne does.
+        "if (a === 'sync') { fs.writeFileSync(pinFile, 'debug'); process.exit(0); }",
+        "if (a === 'swap-flavor') {",
+        "  const desired = process.env.CONFIGURATION === 'Release' ? 'release' : 'debug';",
+        "  const pin = fs.existsSync(pinFile) ? fs.readFileSync(pinFile, 'utf8').trim() : 'debug';",
+        '  if (pin !== desired) {',
+        '    fs.writeFileSync(pinFile, desired);',
+        "    console.log('error: corrected ' + pin + ' -> ' + desired);",
+        '    process.exit(1);',
+        '  }',
+        '  process.exit(0);',
+        '}',
+        'process.exit(0);',
+      ].join('\n'),
+    );
+    const scriptFile = path.join(dir, 'phase.sh');
+    fs.writeFileSync(scriptFile, buildSyncAutolinkingScript(rnDir));
+    return scriptFile;
+  }
+
+  afterEach(() => fs.rmSync(dir, {recursive: true, force: true}));
+
+  function run(scriptFile, configuration) {
+    try {
+      execFileSync('/bin/sh', [scriptFile], {
+        env: {
+          ...process.env,
+          SRCROOT: srcroot,
+          BUILT_PRODUCTS_DIR: path.join(dir, 'products'),
+          NODE_BINARY: process.execPath,
+          CONFIGURATION: configuration,
+          FAKE_PIN_FILE: pinFile,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        encoding: 'utf8',
+      });
+      return {code: 0};
+    } catch (e) {
+      return {code: e.status, out: (e.stdout || '') + (e.stderr || '')};
+    }
+  }
+
+  it('SUCCEEDS (exit 0) when only the TRAILING swap repoints (sync re-pinned mid-build) — not a mismatched start', () => {
+    // Start on release, build Release: the LEADING swap is matched (no
+    // correction). The (stale) sync re-pins to debug, so the TRAILING swap
+    // repoints back to release. Only the leading swap may flag a mismatch, so
+    // this must NOT fail the build.
+    const {code} = run(setup('release'), 'Release');
+    expect(code).toBe(0);
+  });
+
+  it('FAILS the build (exit 1) when the build STARTED on the wrong flavor (leading swap corrects)', () => {
+    // Start on debug, build Release: the LEADING swap corrects debug->release and
+    // flags it → fail once, converge, rebuild green.
+    const {code, out} = run(setup('debug'), 'Release');
+    expect(code).toBe(1);
+    expect(out).toMatch(/error:/);
+  });
+
+  it('SUCCEEDS (exit 0) when the build started matched (Debug on debug)', () => {
+    const {code} = run(setup('debug'), 'Debug');
+    expect(code).toBe(0);
   });
 });

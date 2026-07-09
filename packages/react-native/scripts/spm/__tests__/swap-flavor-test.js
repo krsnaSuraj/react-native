@@ -14,23 +14,15 @@
 // JSON — plutil is macOS-only, so on Linux CI the real spawn ENOENTs and
 // jest-worker can't serialize the resulting error, killing the whole suite.
 // Stand in with a portable plist-parse. Mocked at the `child_process` module
-// level (not via jest.spyOn) because swap-flavor.js destructures
-// `execFileSync` at require time, so a post-import spy would never be seen.
-// Every execFileSync call is recorded on globalThis.__spmExecCalls so tests can
-// assert on `codesign` / `rsync` invocations. `plutil` is stubbed (macOS-only)
-// with a portable plist-parse; `codesign` is recorded but NOT run (it would fail
-// on a fake framework / be absent on Linux CI); everything else (rsync) runs for
-// real so file-content assertions hold. Mocked at the module level because
-// swap-flavor.js destructures `execFileSync` at require time.
+// level (not via jest.spyOn) because swap-flavor.js destructures `execFileSync`
+// at require time, so a post-import spy would never be seen. `plutil` is stubbed
+// (macOS-only); everything else (rsync) runs for real so file-content assertions
+// hold.
 jest.mock('child_process', () => {
   const actual = jest.requireActual('child_process');
   return {
     ...actual,
     execFileSync: (cmd, args, opts) => {
-      (globalThis.__spmExecCalls = globalThis.__spmExecCalls || []).push({
-        cmd,
-        args,
-      });
       if (cmd === 'plutil') {
         const fs = require('fs');
         const plist = require('plist');
@@ -38,12 +30,6 @@ jest.mock('child_process', () => {
         return Buffer.from(
           JSON.stringify(plist.parse(fs.readFileSync(file, 'utf8'))),
         );
-      }
-      if (cmd === 'codesign') {
-        if (globalThis.__spmCodesignThrows === true) {
-          throw new Error('codesign boom');
-        }
-        return Buffer.from(''); // record only — don't actually sign
       }
       return actual.execFileSync(cmd, args, opts);
     },
@@ -132,8 +118,6 @@ describe('swapFlavorFrameworks', () => {
   const read = p => fs.readFileSync(p, 'utf8');
 
   beforeEach(() => {
-    globalThis.__spmExecCalls = [];
-    globalThis.__spmCodesignThrows = false;
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swap-fw-'));
     // Cache slots: debug + release, each with a React.framework binary tagged
     // by flavor so we can assert which one landed.
@@ -583,106 +567,109 @@ describe('swapFlavorFrameworks', () => {
     );
   });
 
-  // --- Embedded-copy correction inside the .app bundle (deterministic fix) ---
-  const codesignCalls = () =>
-    (globalThis.__spmExecCalls || []).filter(c => c.cmd === 'codesign');
-  // Materializes the framework Xcode embedded into the .app; returns paths.
-  const mkEmbedded = () => {
-    const targetBuildDir = path.join(tmp, 'target');
-    const frameworksFolderPath = 'MyApp.app/Frameworks';
-    const fwDir = path.join(
-      targetBuildDir,
-      frameworksFolderPath,
-      'React.framework',
+  // --- HARD-FAIL + CONVERGE: the return value drives the CLI's exit code. ---
+  it('returns builtinsCorrected + flavor info when it repoints a mismatch in-target', () => {
+    const result = swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+    expect(result.builtinsCorrected).toBe(true);
+    expect(result.hasProducts).toBe(true);
+    expect(result.flavor).toBe('release');
+    expect(result.previousFlavor).toBe('debug');
+  });
+
+  it('returns builtinsCorrected=false for a matched (Debug) build', () => {
+    const result = swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Debug',
+      builtProductsDir: builtProducts,
+      platformName: 'iphonesimulator',
+    });
+    expect(result.builtinsCorrected).toBe(false);
+    expect(result.hasProducts).toBe(true);
+  });
+
+  it('reports hasProducts=false in the pre-action context but still repoints', () => {
+    const result = swapFlavorFrameworks({
+      appRoot,
+      configuration: 'Release',
+      builtProductsDir: null,
+      platformName: 'iphonesimulator',
+    });
+    expect(result.hasProducts).toBe(false);
+    expect(result.builtinsCorrected).toBe(true);
+    expect(pinnedSlot()).toBe('release');
+  });
+
+  it('does NOT count a plugin-only repoint as builtinsCorrected', () => {
+    // A DEBUG build: React is pinned debug → MATCHED (no builtin repoint). Only
+    // the plugin (pinned release) mismatches and flips to debug.
+    const autolinking = path.join(appRoot, 'build', 'generated', 'autolinking');
+    fs.mkdirSync(autolinking, {recursive: true});
+    const slice = [
+      {id: 'ios-arm64_x86_64-simulator', platform: 'ios', variant: 'simulator'},
+    ];
+    const rel = path.join(tmp, 'plugin', 'release', 'P.xcframework');
+    const dbg = path.join(tmp, 'plugin', 'debug', 'P.xcframework');
+    mkXcframework(rel, 'P', slice, 'P-release');
+    mkXcframework(dbg, 'P', slice, 'P-debug');
+    const linkDir = path.join(autolinking, 'P', 'artifacts');
+    fs.mkdirSync(linkDir, {recursive: true});
+    const link = path.join(linkDir, 'P.xcframework');
+    fs.symlinkSync(rel, link); // plugin pinned RELEASE (mismatches a Debug build)
+    fs.writeFileSync(
+      path.join(autolinking, '.spm-plugin-flavored-artifacts.json'),
+      JSON.stringify([{name: 'P', link, flavors: {debug: dbg, release: rel}}]),
     );
-    fs.mkdirSync(fwDir, {recursive: true});
-    fs.writeFileSync(path.join(fwDir, 'React'), 'REACT-debug');
-    return {targetBuildDir, frameworksFolderPath, fwDir};
-  };
 
-  it('rsyncs the embedded .app copy and re-codesigns it (Release)', () => {
-    const {targetBuildDir, frameworksFolderPath, fwDir} = mkEmbedded();
-    swapFlavorFrameworks({
+    const result = swapFlavorFrameworks({
       appRoot,
-      configuration: 'Release',
+      configuration: 'Debug', // React (debug) is matched; only the plugin flips.
       builtProductsDir: builtProducts,
       platformName: 'iphonesimulator',
-      targetBuildDir,
-      frameworksFolderPath,
-      expandedCodeSignIdentity: 'ABC123',
     });
-    expect(read(path.join(fwDir, 'React'))).toBe('REACT-release');
-    const cs = codesignCalls();
-    expect(cs).toHaveLength(1);
-    expect(cs[0].args).toEqual([
-      '--force',
-      '--preserve-metadata=identifier,entitlements,flags',
-      '--sign',
-      'ABC123',
-      fwDir,
-    ]);
+    // A plugin repoint happened, but no BUILTIN was corrected.
+    expect(result.builtinsCorrected).toBe(false);
+    // Confirm the plugin symlink actually flipped to debug.
+    expect(path.basename(path.dirname(fs.readlinkSync(link)))).toBe('debug');
   });
+});
 
-  it('re-codesigns with the ad-hoc "-" identity when none is set (simulator)', () => {
-    const {targetBuildDir, frameworksFolderPath} = mkEmbedded();
-    swapFlavorFrameworks({
-      appRoot,
-      configuration: 'Release',
-      builtProductsDir: builtProducts,
-      platformName: 'iphonesimulator',
-      targetBuildDir,
-      frameworksFolderPath,
-    });
-    const cs = codesignCalls();
-    expect(cs).toHaveLength(1);
-    expect(cs[0].args[3]).toBe('-');
+// RN must have ZERO writers of the built .app bundle — Xcode is the single
+// writer of `.app/Frameworks`. This is a structural guard (grep-verifiable): the
+// swap-flavor + CLI sources must not reference the embedded-destination /
+// codesign / stamp surface.
+describe('no .app writers (structural)', () => {
+  const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  it('swap-flavor.js has no embedded-dest / codesign code', () => {
+    const src = read('swap-flavor.js');
+    for (const needle of [
+      'TARGET_BUILD_DIR',
+      'FRAMEWORKS_FOLDER_PATH',
+      'targetBuildDir',
+      'frameworksFolderPath',
+      'codesign',
+      'CODE_SIGNING_ALLOWED',
+      'EXPANDED_CODE_SIGN',
+    ]) {
+      expect(src).not.toContain(needle);
+    }
   });
-
-  it('skips codesign when CODE_SIGNING_ALLOWED=NO (but still corrects the copy)', () => {
-    const {targetBuildDir, frameworksFolderPath, fwDir} = mkEmbedded();
-    swapFlavorFrameworks({
-      appRoot,
-      configuration: 'Release',
-      builtProductsDir: builtProducts,
-      platformName: 'iphonesimulator',
-      targetBuildDir,
-      frameworksFolderPath,
-      codeSigningAllowed: 'NO',
-    });
-    expect(read(path.join(fwDir, 'React'))).toBe('REACT-release'); // corrected
-    expect(codesignCalls()).toHaveLength(0); // but not signed
-  });
-
-  it('does not touch an embedded copy when the env vars are absent', () => {
-    const {fwDir} = mkEmbedded();
-    swapFlavorFrameworks({
-      appRoot,
-      configuration: 'Release',
-      builtProductsDir: builtProducts,
-      platformName: 'iphonesimulator',
-      // no targetBuildDir / frameworksFolderPath
-    });
-    expect(read(path.join(fwDir, 'React'))).toBe('REACT-debug'); // untouched
-    expect(codesignCalls()).toHaveLength(0);
-  });
-
-  it('is non-fatal when codesign fails', () => {
-    globalThis.__spmCodesignThrows = true;
-    const {targetBuildDir, frameworksFolderPath, fwDir} = mkEmbedded();
-    const logs = [];
-    expect(() =>
-      swapFlavorFrameworks({
-        appRoot,
-        configuration: 'Release',
-        builtProductsDir: builtProducts,
-        platformName: 'iphonesimulator',
-        targetBuildDir,
-        frameworksFolderPath,
-        logger: {log: m => logs.push(m)},
-      }),
-    ).not.toThrow();
-    // The copy is still corrected; the failure is logged, not thrown.
-    expect(read(path.join(fwDir, 'React'))).toBe('REACT-release');
-    expect(logs.some(m => /codesign failed/.test(m))).toBe(true);
+  it('setup-apple-spm.js does not wire embedded-dest / codesign env into swap-flavor', () => {
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'setup-apple-spm.js'),
+      'utf8',
+    );
+    for (const needle of [
+      'TARGET_BUILD_DIR',
+      'FRAMEWORKS_FOLDER_PATH',
+      'CODE_SIGNING_ALLOWED',
+      'EXPANDED_CODE_SIGN_IDENTITY',
+    ]) {
+      expect(src).not.toContain(needle);
+    }
   });
 });

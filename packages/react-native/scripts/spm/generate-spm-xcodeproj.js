@@ -34,6 +34,7 @@ const {
   quoteIfNeeded,
   removeArrayMembersByUuid,
   removeArrayStringValues,
+  removeDanglingJavaScriptCoreRef,
   removeEmptyPodsGroup,
   removeField,
   removeObjectByUuid,
@@ -1279,6 +1280,25 @@ function cleanupLeftoverPodsGroup(xcodeprojPath /*: string */) /*: boolean */ {
 }
 
 /**
+ * Strip the dangling `JavaScriptCore.framework` file reference the community
+ * template has carried since RN 0.60 (navigator-only, meaningless under
+ * Hermes) — see `removeDanglingJavaScriptCoreRef` for the full rationale and
+ * the safety gate that leaves a still-linked reference untouched. No-op when
+ * absent or when the pbxproj is missing.
+ */
+function cleanupDanglingJavaScriptCoreRef(
+  xcodeprojPath /*: string */,
+) /*: boolean */ {
+  const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
+  if (!fs.existsSync(pbxprojPath)) {
+    return false;
+  }
+  const original = fs.readFileSync(pbxprojPath, 'utf8');
+  const cleaned = removeDanglingJavaScriptCoreRef(original);
+  return cleaned !== original ? writeIfChanged(pbxprojPath, cleaned) : false;
+}
+
+/**
  * Add SPM packages to a user's EXISTING xcodeproj in place. Returns
  * {status: 'injected', target} on success, or {status: 'refused', reason}
  * when the project can't be safely edited (caller surfaces it; fail-loud).
@@ -1505,6 +1525,7 @@ module.exports = {
   injectSpmIntoExistingXcodeproj,
   removeSpmInjection,
   cleanupLeftoverPodsGroup,
+  cleanupDanglingJavaScriptCoreRef,
   addPreActionToScheme,
   removePreActionFromScheme,
   SPM_INJECTED_MARKER,

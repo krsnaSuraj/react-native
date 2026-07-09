@@ -24,6 +24,7 @@ const {
   quoteIfNeeded,
   removeArrayMembersByUuid,
   removeArrayStringValues,
+  removeDanglingJavaScriptCoreRef,
   removeEmptyPodsGroup,
   removeField,
   removeObjectByUuid,
@@ -379,5 +380,71 @@ describe('removeEmptyPodsGroup', () => {
       .filter(l => !l.includes('Pods'))
       .join('\n');
     expect(removeEmptyPodsGroup(noPods)).toBe(noPods);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// removeDanglingJavaScriptCoreRef — strip the community template's leftover
+// `JavaScriptCore.framework` PBXFileReference (navigator-only since RN 0.60,
+// meaningless under Hermes) unless it's actually linked.
+// ---------------------------------------------------------------------------
+
+describe('removeDanglingJavaScriptCoreRef', () => {
+  const JSC_FILE_REF =
+    '\t\tED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };';
+
+  // A Frameworks group referencing the dangling JavaScriptCore.framework ref.
+  const WITH_DANGLING_JSC = [
+    '// !$*UTF8*$!',
+    '{',
+    '\tobjects = {',
+    '/* Begin PBXFileReference section */',
+    JSC_FILE_REF,
+    '/* End PBXFileReference section */',
+    '/* Begin PBXGroup section */',
+    '\t\t13B07FAF1A68108700A75B9A /* Frameworks */ = {',
+    '\t\t\tisa = PBXGroup;',
+    '\t\t\tchildren = (',
+    '\t\t\t\tED297162215061F000B7C4FE /* JavaScriptCore.framework */,',
+    '\t\t\t);',
+    '\t\t\tname = Frameworks;',
+    '\t\t\tsourceTree = "<group>";',
+    '\t\t};',
+    '/* End PBXGroup section */',
+    '\t};',
+    '}',
+    '',
+  ].join('\n');
+
+  it('removes both the file reference object and its group membership when dangling', () => {
+    const out = removeDanglingJavaScriptCoreRef(WITH_DANGLING_JSC);
+    expect(out).not.toContain('JavaScriptCore.framework');
+    expect(out).not.toContain('ED297162215061F000B7C4FE');
+    // The parent group survives, now childless.
+    expect(out).toContain('13B07FAF1A68108700A75B9A /* Frameworks */ = {');
+  });
+
+  it('leaves a still-linked reference untouched (a PBXBuildFile references it)', () => {
+    const linked = WITH_DANGLING_JSC.replace(
+      '/* Begin PBXFileReference section */',
+      '/* Begin PBXBuildFile section */\n' +
+        '\t\tED2971642150620600B7C4FE /* JavaScriptCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = ED297162215061F000B7C4FE /* JavaScriptCore.framework */; };\n' +
+        '/* End PBXBuildFile section */\n' +
+        '/* Begin PBXFileReference section */',
+    );
+    expect(removeDanglingJavaScriptCoreRef(linked)).toBe(linked);
+  });
+
+  it('is a no-op when there is no JavaScriptCore reference', () => {
+    const noJsc = WITH_DANGLING_JSC.split('\n')
+      .filter(l => !l.includes('JavaScriptCore'))
+      .join('\n');
+    expect(removeDanglingJavaScriptCoreRef(noJsc)).toBe(noJsc);
+  });
+
+  it('is idempotent', () => {
+    const once = removeDanglingJavaScriptCoreRef(WITH_DANGLING_JSC);
+    const twice = removeDanglingJavaScriptCoreRef(once);
+    expect(twice).toBe(once);
   });
 });

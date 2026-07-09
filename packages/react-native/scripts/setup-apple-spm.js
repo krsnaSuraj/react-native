@@ -89,6 +89,7 @@ const {main: generatePackage} = require('./spm/generate-spm-package');
 const {findSourcePath} = require('./spm/generate-spm-package');
 const {
   SPM_INJECTED_MARKER,
+  cleanupDanglingJavaScriptCoreRef,
   cleanupLeftoverPodsGroup,
   injectSpmIntoExistingXcodeproj,
   removeSpmInjection,
@@ -811,6 +812,7 @@ async function setupXcodeproj(
   args /*: SetupArgs */,
   appRoot /*: string */,
   reactNativeRoot /*: string */,
+  action /*: string */,
 ) /*: Promise<void> */ {
   const target = resolveInjectionTarget(args, appRoot);
   if (target.error != null) {
@@ -887,6 +889,17 @@ async function setupXcodeproj(
     logError(`SPM injection failed: ${result.reason}`);
     process.exitCode = 1;
     throw new Error(result.reason);
+  }
+
+  // The community template has carried a dangling `JavaScriptCore.framework`
+  // reference since RN 0.60 (navigator-only, unlinked, meaningless under
+  // Hermes) — one-time migration hygiene at conversion time, like the empty
+  // Pods group above. `add` only; `update` stays a minimal re-sync.
+  if (action === 'add' && cleanupDanglingJavaScriptCoreRef(xcodeprojPath)) {
+    log(
+      "Removed the template's dangling JavaScriptCore.framework reference " +
+        '(unused; React Native uses Hermes).',
+    );
   }
 }
 
@@ -1257,7 +1270,7 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // Xcodeproj setup: in-place injection into the existing project (the only
   // strategy — no rename, no from-scratch; git is the safety net).
   try {
-    await setupXcodeproj(args, appRoot, reactNativeRoot);
+    await setupXcodeproj(args, appRoot, reactNativeRoot, action);
   } catch (e) {
     logError(`xcodeproj setup failed: ${e.message}`);
     if (process.exitCode == null) {

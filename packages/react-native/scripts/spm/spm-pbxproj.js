@@ -552,6 +552,53 @@ function removeEmptyPodsGroup(text /*: string */) /*: string */ {
   return removeObjectByUuid(removeArrayMembersByUuid(text, [uuid]), uuid);
 }
 
+/**
+ * Remove the dangling `JavaScriptCore.framework` PBXFileReference the
+ * community template has carried since RN 0.60 (an SDK framework reference
+ * left over from the pre-Hermes JSC-via-CocoaPods era). It's navigator-only —
+ * never wired into any PBXBuildFile/build phase — so it's meaningless (and
+ * confusing) now that React Native uses Hermes. Only removes references that
+ * are truly unlinked: if a PBXBuildFile still references the UUID (e.g. an
+ * app that deliberately links JSC, such as via react-native-javascriptcore),
+ * that reference is left completely untouched. Removes the file-reference
+ * object AND its membership in any parent group. No-op when absent. Like
+ * `removeEmptyPodsGroup`, `deinit` does not restore this removal — git is the
+ * safety net.
+ */
+function removeDanglingJavaScriptCoreRef(text /*: string */) /*: string */ {
+  const re =
+    /\n[\t ]*([0-9A-Fa-f]{24}) \/\* JavaScriptCore\.framework \*\/ = \{[^{}]*?\};/g;
+  const uuidsToRemove = [];
+  for (const m of text.matchAll(re)) {
+    const block = m[0];
+    if (
+      !/isa = PBXFileReference;/.test(block) ||
+      !/path = System\/Library\/Frameworks\/JavaScriptCore\.framework;/.test(
+        block,
+      ) ||
+      !/sourceTree = SDKROOT;/.test(block)
+    ) {
+      continue;
+    }
+    const uuid = m[1];
+    const linked = new RegExp(`\\bfileRef = ${escapeRegExp(uuid)}\\b`).test(
+      text,
+    );
+    if (!linked) {
+      uuidsToRemove.push(uuid);
+    }
+  }
+  if (uuidsToRemove.length === 0) {
+    return text;
+  }
+  // Drop the parent group's child reference(s) first, then the file objects.
+  let out = removeArrayMembersByUuid(text, uuidsToRemove);
+  for (const uuid of uuidsToRemove) {
+    out = removeObjectByUuid(out, uuid);
+  }
+  return out;
+}
+
 module.exports = {
   generateUUID,
   namespacedUUID,
@@ -578,4 +625,5 @@ module.exports = {
   removeField,
   removeArrayStringValues,
   removeEmptyPodsGroup,
+  removeDanglingJavaScriptCoreRef,
 };

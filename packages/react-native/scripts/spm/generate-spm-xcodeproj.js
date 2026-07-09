@@ -262,13 +262,13 @@ function buildSyncAutolinkingScript(
 
 # Swap the flavored framework binaries (React / ReactNativeDependencies /
 # hermesvm) to match the Xcode build configuration. SwiftPM can't branch a
-# binaryTarget on \$CONFIGURATION, so — mirroring the CocoaPods
+# binaryTarget on $CONFIGURATION, so — mirroring the CocoaPods
 # React-Core-prebuilt swap (replace-rncore-version.js) — we overwrite the
-# SPM-copied frameworks in \$BUILT_PRODUCTS_DIR/PackageFrameworks with the
+# SPM-copied frameworks in $BUILT_PRODUCTS_DIR/PackageFrameworks with the
 # correct-flavor slices, before Link. Runs on EVERY build (a config flip changes
 # no sync input) and is timing-robust: it operates on the ALREADY-copied
 # frameworks, so it doesn't race SPM package resolution. A no-op in the scheme
-# pre-action (\$BUILT_PRODUCTS_DIR unset / nothing copied yet) and when already
+# pre-action ($BUILT_PRODUCTS_DIR unset / nothing copied yet) and when already
 # the right flavor. Non-fatal.
 if command -v npx >/dev/null 2>&1 && [ -n "\${BUILT_PRODUCTS_DIR:-}" ]; then
   ( cd "$SRCROOT" && npx react-native spm swap-flavor ) \\
